@@ -9,8 +9,8 @@
 
 ## Targets verified
 
-- `vscode`: 28 tools
-- `repo-fs`: 14 tools (uses `npx --offline` to avoid network cold-start delays)
+- `repo`: 28 tools (stable Python MCP server, no npx dependency)
+- `vscode`: 28 tools (same backend)
 - Bridge endpoint: `ws://127.0.0.1:17613`
 
 ## Workflow
