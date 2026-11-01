@@ -10,7 +10,7 @@
 ## Targets verified
 
 - `vscode`: 28 tools
-- `repo-fs`: 14 tools (uses `npx --prefer-offline`)
+- `repo-fs`: 14 tools (uses `npx --offline` to avoid network cold-start delays)
 - Bridge endpoint: `ws://127.0.0.1:17613`
 
 ## Workflow
