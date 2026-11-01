@@ -96,6 +96,13 @@ def _vscode_storage_paths() -> List[Path]:
 
 
 def get_root() -> Path:
+    env_root = os.environ.get("ZS_WORKSPACE_ROOT") or os.environ.get("MCP_ROOT")
+    if env_root:
+        candidate = Path(env_root).expanduser().resolve()
+        if candidate.is_dir():
+            return candidate
+        raise RuntimeError(f"Configured workspace root does not exist: {env_root}")
+
     active = _vscode_active_folder()
     if active is None:
         raise RuntimeError("Open a project folder in VS Code before using the VS Code MCP server.")
