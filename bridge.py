@@ -122,10 +122,10 @@ class MCPServer:
                         "capabilities": {},
                         "clientInfo": {"name": "snapgent-bridge", "version": BRIDGE_VERSION},
                     },
-                    timeout=12,
+                    timeout=30,
                 )
                 await self._notify("notifications/initialized")
-                result = await self._request("tools/list", {}, timeout=20)
+                result = await self._request("tools/list", {}, timeout=30)
                 raw_tools = result.get("tools", []) if isinstance(result, dict) else []
                 if not isinstance(raw_tools, list):
                     raise RuntimeError("MCP tools/list returned an invalid tool list.")
