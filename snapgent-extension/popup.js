@@ -24,13 +24,23 @@ function render(s) {
     ? (ok ? "Connected"
         : studioOff ? "No Studio"
         : "Open Studio")
+    : s.authRequired ? "Bridge token required"
     : "Bridge offline";
+  // Only prompt for the token while the bridge is actively refusing us.
+  document.getElementById("pair").hidden = !(s.authRequired && !s.connected);
+  // Offer to re-pair whenever a token is stored, including while connected.
+  document.getElementById("forget-token").hidden = !s.savedToken;
+  // Rotation needs an authenticated socket; the bridge applies the new token live.
+  document.getElementById("rotate-token").hidden = !(s.connected && s.savedToken);
   const ver = document.getElementById("ver");
   const extVer = chrome.runtime.getManifest().version;
   ver.textContent = !s.connected ? `ext v${extVer}`
     : s.bridgeVersion ? `ext v${extVer} · bridge v${s.bridgeVersion}`
     : `ext v${extVer} · bridge old`;
-  tools.textContent = s.connected ? `${s.tools || 0} tools` : "Run start.bat";
+  tools.textContent = s.connected
+    ? `${s.tools || 0} tools`
+    : s.authRequired ? "Paste the token below"
+    : "Run start.bat";
   servers.textContent = s.connected
     ? list.map((x) => `${x.alive ? "●" : "○"} ${x.id} (${x.alive ? x.tools + " tools" : "down"})`).join("\n")
     : "";
@@ -48,6 +58,37 @@ document.getElementById("restart").addEventListener("click", (e) => {
   chrome.runtime.sendMessage({ type: "restart_mcp" }, () => {
     e.target.textContent = "⟳ Restart";
     setTimeout(refresh, 600);
+  });
+});
+document.getElementById("save-token").addEventListener("click", () => {
+  const input = document.getElementById("token");
+  const value = input.value.trim();
+  if (!value) return;
+  chrome.storage.local.set({ bridgeToken: value }, () => {
+    input.value = "";
+    chrome.runtime.sendMessage({ type: "reconnect" }, () => setTimeout(refresh, 800));
+  });
+});
+document.getElementById("rotate-token").addEventListener("click", (e) => {
+  const button = e.target;
+  button.textContent = "Rotating…";
+  chrome.runtime.sendMessage({ type: "rotate_token" }, (r) => {
+    if (r && r.ok) {
+      button.textContent = "🔑 Rotate token";
+    } else {
+      button.textContent = "✗ Rotation failed";
+      setTimeout(() => { button.textContent = "🔑 Rotate token"; }, 3000);
+      console.warn("token rotation failed:", r && r.error);
+    }
+    setTimeout(refresh, 600);
+  });
+});
+document.getElementById("forget-token").addEventListener("click", () => {
+  chrome.storage.local.remove("bridgeToken", () => {
+    document.getElementById("token").value = "";
+    // Reconnect without a token: the bridge answers 1008 and the pairing card
+    // comes back, so a fresh token can be pasted.
+    chrome.runtime.sendMessage({ type: "reconnect" }, () => setTimeout(refresh, 800));
   });
 });
 document.getElementById("settings").addEventListener("click", () => {

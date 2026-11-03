@@ -12,6 +12,8 @@ class VscodeMcpTests(unittest.TestCase):
         self.root = Path(self.temp.name).resolve()
         self.workspace = self.root / "workspace"
         self.workspace.mkdir()
+        # Kept so the catalog tests below can exercise the real get_root().
+        self.get_root_original = vscode_mcp.get_root
         self.root_patch = patch.object(vscode_mcp, "get_root", return_value=self.workspace)
         self.root_patch.start()
         self.addCleanup(self.root_patch.stop)
@@ -23,6 +25,29 @@ class VscodeMcpTests(unittest.TestCase):
         self.assertEqual(len(set(names)), 28)
         for name in ("delete_file", "apply_patch", "git_add", "git_commit"):
             self.assertIn(name, names)
+
+    def _tools_list(self):
+        with patch.object(vscode_mcp, "send_message") as send:
+            vscode_mcp.handle_request(
+                {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+            )
+        return send.call_args[0][0]["result"]["tools"]
+
+    def test_tools_list_works_from_env_root_without_vscode(self):
+        # Regression: tools/list used to gate on _vscode_active_folder(), so the
+        # documented "repo" target (config.json + ZS_WORKSPACE_ROOT) advertised
+        # zero tools on any machine without a VS Code window open.
+        with patch.object(vscode_mcp, "get_root", self.get_root_original), patch.object(
+            vscode_mcp, "_vscode_active_folder", return_value=None
+        ), patch.dict("os.environ", {"ZS_WORKSPACE_ROOT": str(self.workspace)}):
+            tools = self._tools_list()
+        self.assertEqual([tool["name"] for tool in tools], [tool["name"] for tool in vscode_mcp.TOOLS])
+
+    def test_tools_list_is_empty_without_any_root(self):
+        with patch.object(vscode_mcp, "get_root", self.get_root_original), patch.object(
+            vscode_mcp, "_vscode_active_folder", return_value=None
+        ), patch.dict("os.environ", {"ZS_WORKSPACE_ROOT": "", "MCP_ROOT": ""}):
+            self.assertEqual(self._tools_list(), [])
 
     def test_delete_file_refuses_unsafe_targets(self):
         vscode_mcp.create_file("notes.txt", "x")

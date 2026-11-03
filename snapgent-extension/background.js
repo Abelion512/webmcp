@@ -9,6 +9,9 @@
 
 const PORT = 17613;
 const URL = `ws://127.0.0.1:${PORT}`;
+// Pairing secret issued by the bridge (~/.snapgent/bridge_token). The popup saves
+// it here; the bridge rejects connections without it once auth is enabled.
+const TOKEN_KEY = "bridgeToken";
 
 // Chat sites where a snapgentV3 provider content script runs. Status pushes go
 // to every tab matching these. Add the new provider's URL pattern here (and in
@@ -26,6 +29,9 @@ const REQUEST_TIMEOUT_DEFAULT = 130000; // a bit above the 120s tool timeout
 
 let ws = null;
 let connected = false;
+let authRequired = false; // bridge closed us with 1008: token missing or wrong
+let bridgeToken = null; // cached chrome.storage value; null = not read yet
+let connecting = false;
 let reconnectDelay = RECONNECT_MIN;
 let reconnectTimer = null;
 let heartbeatTimer = null;
@@ -58,21 +64,40 @@ function log(...a) {
 }
 
 // ── WebSocket lifecycle ─────────────────────────────────────────────────
-function connect() {
+function readBridgeToken() {
+  return new Promise((resolve) => {
+    try {
+      chrome.storage.local.get(TOKEN_KEY, (values) => {
+        resolve((values && values[TOKEN_KEY]) || "");
+      });
+    } catch {
+      resolve("");
+    }
+  });
+}
+
+async function connect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
     return;
   }
+  if (connecting) return;
+  connecting = true;
   clearTimeout(reconnectTimer);
   try {
-    ws = new WebSocket(URL);
+    if (bridgeToken === null) bridgeToken = await readBridgeToken();
+    const url = bridgeToken ? `${URL}/?token=${encodeURIComponent(bridgeToken)}` : URL;
+    ws = new WebSocket(url);
   } catch (e) {
     log("WebSocket ctor failed", e);
     scheduleReconnect();
     return;
+  } finally {
+    connecting = false;
   }
 
   ws.onopen = () => {
     connected = true;
+    authRequired = false;
     reconnectDelay = RECONNECT_MIN;
     lastMessageAt = Date.now();
     log("connected to bridge");
@@ -91,8 +116,10 @@ function connect() {
     handleBridgeMessage(msg);
   };
 
-  ws.onclose = () => {
+  ws.onclose = (ev) => {
     connected = false;
+    // 1008 = policy violation: the bridge wants a token we do not have yet.
+    authRequired = !!ev && ev.code === 1008;
     mcpAlive = false;
     studioConnected = null;
     studioApp = null;
@@ -289,7 +316,7 @@ function failAllPending(reason) {
 
 // ── status push to any open DeepSeek tab + popup ─────────────────────────
 function statusObj() {
-  return { type: "zs-status", connected, mcpAlive, bridgeVersion, studio: studioConnected, studioApp, studioProc, tools: toolsCache.length, servers: serversCache };
+  return { type: "zs-status", connected, authRequired, savedToken: !!bridgeToken, mcpAlive, bridgeVersion, studio: studioConnected, studioApp, studioProc, tools: toolsCache.length, servers: serversCache };
 }
 
 function broadcastStatus() {
@@ -305,6 +332,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     switch (msg.type) {
       case "status":
         if (!connected) connect(); // self-heal after a worker wake-up
+        if (bridgeToken === null) bridgeToken = await readBridgeToken();
         sendResponse(statusObj());
         break;
       case "list_tools": {
@@ -324,6 +352,20 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           { type: "call_tool", name: msg.name, arguments: msg.arguments, timeout: msg.timeout, server: msg.server },
           timeout
         );
+        sendResponse(r);
+        break;
+      }
+      case "rotate_token": {
+        // The bridge is already authenticated by the current token and applies the
+        // new one to future handshakes, so no restart or reconnect is needed.
+        const r = await send({ type: "rotate_token" }, 15000);
+        if (r.ok && r.token) {
+          bridgeToken = r.token;
+          await new Promise((resolve) =>
+            chrome.storage.local.set({ [TOKEN_KEY]: r.token }, resolve)
+          );
+          broadcastStatus();
+        }
         sendResponse(r);
         break;
       }
@@ -347,6 +389,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       }
       case "reconnect":
         reconnectDelay = RECONNECT_MIN;
+        bridgeToken = null; // re-read: the popup may have just saved a token
         connect();
         sendResponse({ ok: true });
         break;

@@ -11,6 +11,7 @@
 [![License](https://img.shields.io/badge/LICENSE-GPL--3.0-FACC15?style=flat-square&labelColor=111111&logo=opensourceinitiative&logoColor=FACC15)](LICENSE)
 [![Manifest](https://img.shields.io/badge/MANIFEST-V3-FACC15?style=flat-square&labelColor=111111&logo=googlechrome&logoColor=FACC15)](https://developer.chrome.com/docs/extensions/develop/migrate/what-is-mv3/)
 [![Release](https://img.shields.io/badge/RELEASE-V3.9.4-FACC15?style=flat-square&labelColor=111111&logo=semanticrelease&logoColor=FACC15)](https://github.com/herdodp/snapgent-connector/releases/tag/V3.9.4)
+[![CI](https://img.shields.io/github/actions/workflow/status/Abelion512/webmcp/ci.yml?branch=main&label=CI&style=flat-square&labelColor=111111&logo=githubactions&logoColor=FACC15)](https://github.com/Abelion512/webmcp/actions/workflows/ci.yml)
 [![MCP](https://img.shields.io/badge/PROTOCOL-MCP-FACC15?style=flat-square&labelColor=111111&logo=modelcontextprotocol&logoColor=FACC15)](https://modelcontextprotocol.io/)
 
 </div>
@@ -169,12 +170,39 @@ For VS Code, open the project folder you want to work on before clicking **Start
   `bash Linux_Start.sh`. It detects the bundled VS Code MCP server and
   installed EffectCraft CLI, then writes
   machine-specific paths to the ignored local `config.json`. It uses
-  `bridge.py`; the first launch installs `websockets` for your user, or creates
-  a local Python environment if your distribution blocks user installs.
+  `bridge.py`; the first launch installs the pinned dependency from
+  `requirements.txt` for your user, or creates a local Python environment if your
+  distribution blocks user installs.
 
 Keep the terminal window open while the bridge runs. On macOS, the first
 launch may show a Gatekeeper warning; select **Done**, then allow the script
 under **System Settings → Privacy & Security**.
+
+**Pairing the extension (bridge token)**
+
+The bridge only accepts connections from the extension, and requires a per-install
+token, so a regular web page cannot drive your workspace through port 17613.
+
+1. The first start creates `~/.snapgent/bridge_token` (mode `600`) and prints the
+   value once in the bridge window, as `bridge token: …`.
+2. Open the snapgentV3 popup. While the bridge is refusing the connection it shows
+   `Bridge token required` together with a token field.
+3. Paste the token, press **Save**, and the popup reconnects as `Connected`.
+
+The extension keeps the token in `chrome.storage.local`. **🔑 Rotate token** (visible
+while connected) asks the bridge for a new secret, saves it on both sides and applies
+it to the next handshake — no restart needed. **🗝 Forget saved token** clears the
+stored copy and shows the pairing field again.
+
+Advanced: `ZS_BRIDGE_TOKEN_FILE` moves the token file, `ZS_BRIDGE_TOKEN` pins an exact
+value (rotation is then refused), and `ZS_BRIDGE_AUTH=0` disables token auth — only
+the token check is affected, the origin allowlist stays active. To inspect the
+configuration without starting the bridge, run `bash Linux_Start.sh --check`.
+
+If the popup keeps saying `Bridge token required` after saving, the token was rotated
+since you copied it: paste the current value from `~/.snapgent/bridge_token`. A `1008`
+policy-violation close in the bridge window means the same thing — see
+[`docs/linux-stability.md`](docs/linux-stability.md).
 
 **Optional: connect EffectCraft**
 
@@ -291,6 +319,7 @@ snapgent-full/
 |---|---|---|
 | snapgentV3 bar is missing | Extension is disabled or site access is blocked | Check the extension is enabled and allowed on the current AI chat site, then reload the tab |
 | Bridge is offline | Bridge is not running | Start `start.bat` (Windows), `MacOS_Start.command` (macOS), or run `bash Linux_Start.sh` (Linux) |
+| Popup shows `Bridge token required` | The bridge refuses the connection without its per-install token (close code 1008) | Paste the token from the bridge window or `~/.snapgent/bridge_token` into the popup field and press **Save** |
 | AI replies without using tools | Provider/model stopped following commands | Remind it to use snapgentV3 commands or start a new chat |
 | VS Code target is unavailable | The bridge is offline or the release is incomplete | Run `start.bat` from the extracted release folder and keep the project open in VS Code |
 | A configured MCP server is missing from the target dropdown | The server was switched off in the **MCP servers** panel, or the extension is outdated | Open **MCP servers** from the ⋯ menu on the snapgent bar and tick the server, then reload the extension in `chrome://extensions` and refresh the chat tab |

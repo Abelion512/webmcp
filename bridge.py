@@ -2,15 +2,18 @@
 """Cross-platform local WebSocket bridge for Snapgent MCP servers."""
 
 import asyncio
+import hmac
 import json
 import logging
 import os
 import re
+import secrets
 import signal
 import socket
 import subprocess
 import sys
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -33,6 +36,25 @@ MCP_PROTOCOL_VERSION = "2024-11-05"
 BRIDGE_VERSION = "3.9.4"
 MAX_LOG_CHARS = 1000
 
+# Handshake policy. Web browsers do not apply CORS to WebSockets, so without an
+# Origin allowlist any website could open ws://127.0.0.1:PORT and call every MCP
+# tool. Only browser-extension origins and non-browser clients (no Origin header
+# at all) are accepted.
+ALLOWED_ORIGIN_PREFIXES = (
+    "chrome-extension://",
+    "moz-extension://",
+    "safari-web-extension://",
+)
+# A per-install shared secret, sent by the extension as ?token=... on connect (or
+# by native clients as the X-Bridge-Token header). Auto-generated on first run.
+TOKEN_ENV = "ZS_BRIDGE_TOKEN"
+TOKEN_PATH_ENV = "ZS_BRIDGE_TOKEN_FILE"
+AUTH_DISABLE_ENV = "ZS_BRIDGE_AUTH"  # set to 0/off/false/no to run without a token
+AUTH_DISABLED_VALUES = {"0", "off", "false", "no"}
+# An unpaired extension retries every few seconds, so repeat rejections are only
+# reported once per interval to keep bridge_debug.log readable.
+REJECT_LOG_INTERVAL = 60.0
+
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
     filename=str(LOG_PATH),
@@ -49,6 +71,121 @@ def log(message: str) -> None:
 
 def _json_line(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def token_path() -> Path:
+    override = (os.environ.get(TOKEN_PATH_ENV) or "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".snapgent" / "bridge_token"
+
+
+def auth_disabled() -> bool:
+    return (os.environ.get(AUTH_DISABLE_ENV) or "").strip().lower() in AUTH_DISABLED_VALUES
+
+
+def load_auth_token() -> Tuple[Optional[str], bool]:
+    """Return (token, created). A token of None means auth is turned off."""
+    if auth_disabled():
+        return None, False
+    env_token = (os.environ.get(TOKEN_ENV) or "").strip()
+    if env_token:
+        return env_token, False
+
+    path = token_path()
+    try:
+        existing = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        existing = ""
+    except OSError as error:
+        log(f"WARNING: could not read the bridge token ({error}); token auth is off.")
+        return None, False
+    if existing:
+        return existing, False
+
+    token = secrets.token_urlsafe(32)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            path.parent.chmod(0o700)
+        except OSError:
+            pass
+        # O_EXCL keeps two bridges racing on first run from overwriting a token
+        # the other one already handed out.
+        handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(token + "\n")
+    except FileExistsError:
+        try:
+            return path.read_text(encoding="utf-8").strip() or None, False
+        except OSError:
+            return None, False
+    except OSError as error:
+        log(f"WARNING: could not create the bridge token ({error}); token auth is off.")
+        return None, False
+    return token, True
+
+
+def _write_token_file(path: Path, token: str) -> None:
+    """Write the token atomically with mode 0600, replacing any previous value."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.parent.chmod(0o700)
+    except OSError:
+        pass
+    temp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+    descriptor = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(token + "\n")
+    except BaseException:
+        try:
+            temp.unlink()
+        except OSError:
+            pass
+        raise
+    os.replace(temp, path)
+
+
+def origin_allowed(origin: Optional[str]) -> bool:
+    if not origin:
+        return True  # native clients (tests, curl, desktop app) send no Origin
+    return origin.startswith(ALLOWED_ORIGIN_PREFIXES)
+
+
+def request_headers(websocket: Any) -> Any:
+    headers = getattr(getattr(websocket, "request", None), "headers", None)
+    if headers is not None:
+        return headers
+    return getattr(websocket, "request_headers", None)  # websockets < 14
+
+
+def request_path(websocket: Any) -> str:
+    path = getattr(getattr(websocket, "request", None), "path", None)
+    if isinstance(path, str):
+        return path
+    legacy = getattr(websocket, "path", None)  # websockets < 14
+    return legacy if isinstance(legacy, str) else ""
+
+
+def _header_value(websocket: Any, name: str) -> Optional[str]:
+    headers = request_headers(websocket)
+    if headers is None:
+        return None
+    try:
+        value = headers.get(name)
+    except AttributeError:
+        return None
+    return value if isinstance(value, str) else None
+
+
+def presented_token(websocket: Any) -> Optional[str]:
+    header_token = (_header_value(websocket, "X-Bridge-Token") or "").strip()
+    if header_token:
+        return header_token
+    query = urllib.parse.parse_qs(urllib.parse.urlparse(request_path(websocket)).query)
+    values = query.get("token") or []
+    return values[0].strip() if values else None
 
 
 class MCPServer:
@@ -279,12 +416,14 @@ class MCPServer:
 
 
 class Bridge:
-    def __init__(self) -> None:
+    def __init__(self, token: Optional[str] = None) -> None:
         self.servers: Dict[str, MCPServer] = {}
         self.clients = set()
         self._client_lock = asyncio.Lock()
         self._catalog: List[Dict[str, Any]] = []
         self._last_studio: Optional[bool] = None
+        self.token = token
+        self._reject_log: Dict[str, Tuple[float, int]] = {}
 
     def load_config(self) -> Dict[str, Dict[str, Any]]:
         if not CONFIG_PATH.exists():
@@ -392,7 +531,66 @@ class Bridge:
         except Exception:
             pass
 
+    def _log_rejection(self, key: str, message: str) -> None:
+        """Log the first rejection, then at most one summary per interval."""
+        now = time.monotonic()
+        last, suppressed = self._reject_log.get(key, (0.0, 0))
+        if last and now - last < REJECT_LOG_INTERVAL:
+            self._reject_log[key] = (last, suppressed + 1)
+            return
+        if suppressed:
+            message = f"{message} ({suppressed} more since the last report)"
+        log(message)
+        self._reject_log[key] = (now, 0)
+
+    def rotate_token(self, request_id: Any = None) -> Dict[str, Any]:
+        """Issue a fresh token that applies to future connections, no restart needed.
+
+        The caller is already authenticated by the current token, and existing
+        connections keep working; only new handshakes use the new value.
+        """
+        response: Dict[str, Any] = {"type": "token_rotated", "id": request_id}
+        if self.token is None:
+            return {**response, "ok": False, "error": f"token auth is disabled ({AUTH_DISABLE_ENV})"}
+        if (os.environ.get(TOKEN_ENV) or "").strip():
+            return {
+                **response,
+                "ok": False,
+                "error": f"the token is pinned by {TOKEN_ENV}; change that variable instead",
+            }
+        token = secrets.token_urlsafe(32)
+        path = token_path()
+        try:
+            _write_token_file(path, token)
+        except OSError as error:
+            log(f"could not rotate the bridge token ({error})")
+            return {**response, "ok": False, "error": f"could not write {path}: {error}"}
+        self.token = token
+        log(f"bridge token rotated; the new token is saved to {path}")
+        return {**response, "ok": True, "token": token}
+
+    async def _reject_handshake(self, websocket: Any, reason: str) -> None:
+        try:
+            await websocket.close(code=1008, reason=reason)
+        except Exception:
+            pass
+
     async def handle_client(self, websocket: Any, _path: Optional[str] = None) -> None:
+        origin = _header_value(websocket, "Origin")
+        if not origin_allowed(origin):
+            self._log_rejection(
+                f"origin:{origin}", f"rejected client from origin {origin!r}"
+            )
+            await self._reject_handshake(websocket, "origin not allowed")
+            return
+        if self.token:
+            presented = presented_token(websocket)
+            if not presented or not hmac.compare_digest(presented, self.token):
+                self._log_rejection(
+                    "token", "rejected client with a missing or invalid bridge token"
+                )
+                await self._reject_handshake(websocket, "bridge token required")
+                return
         async with self._client_lock:
             self.clients.add(websocket)
         log("extension connected")
@@ -457,6 +655,8 @@ class Bridge:
                 response = {"type": "mcp_status", "id": request_id, "ok": False, "alive": False, "error": str(error)}
             await self._send_client(websocket, response)
             await self.broadcast(self._connected_message())
+        elif kind == "rotate_token":
+            await self._send_client(websocket, self.rotate_token(request_id))
         elif kind == "add_server":
             await self._change_server(websocket, request, remove=False)
         elif kind == "remove_server":
@@ -687,7 +887,8 @@ async def run() -> None:
             "The 'websockets' package is required. Install it with "
             f"'{sys.executable} -m pip install websockets'."
         )
-    bridge = Bridge()
+    token, created = load_auth_token()
+    bridge = Bridge(token)
     server = await websockets.serve(
         bridge.handle_client,
         HOST,
@@ -698,6 +899,19 @@ async def run() -> None:
     )
     log(f"snapgent bridge v{BRIDGE_VERSION}")
     log(f"listening on ws://{HOST}:{PORT} - load the extension and open a supported AI chat")
+    if token:
+        if (os.environ.get(TOKEN_ENV) or "").strip():
+            log(f"auth: token required ({TOKEN_ENV}); origin allowlist enforced")
+        else:
+            log(f"auth: token required from {token_path()}; origin allowlist enforced")
+        if created:
+            log("first run: paste this token into the Snapgent popup once (it is saved by the extension)")
+            log(f"bridge token: {token}")
+    else:
+        log(
+            "WARNING: bridge token auth is disabled - any local process can call MCP tools. "
+            f"Unset {AUTH_DISABLE_ENV} and restart the bridge to require a token."
+        )
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
     async def _startup_then_monitor() -> None:

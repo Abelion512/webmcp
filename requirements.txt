@@ -1,0 +1,3 @@
+# Runtime dependency of bridge.py (the WebSocket transport).
+# Pinned so a new release cannot change handshake/serve behaviour silently.
+websockets==16.0

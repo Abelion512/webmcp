@@ -109,6 +109,19 @@ def get_root() -> Path:
     return active.resolve()
 
 
+def catalog_available() -> bool:
+    """Whether a workspace root resolves, so tools can be advertised.
+
+    The root can come from ZS_WORKSPACE_ROOT / MCP_ROOT (the "repo" target) or
+    from the active VS Code window, so this must not look at VS Code alone.
+    """
+    try:
+        get_root()
+    except (RuntimeError, OSError):
+        return False
+    return True
+
+
 def normalize_target(rel_or_abs: str, root: Path) -> Path:
     path = Path(rel_or_abs or ".")
     if not path.is_absolute():
@@ -644,7 +657,7 @@ def handle_request(request: Dict[str, Any]) -> None:
         return
 
     if method == "tools/list":
-        tools = TOOLS if _vscode_active_folder() is not None else []
+        tools = TOOLS if catalog_available() else []
         send_message({"jsonrpc": "2.0", "id": request_id, "result": {"tools": tools}})
         return
 

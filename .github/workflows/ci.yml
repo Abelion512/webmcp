@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run unit tests
+        run: python -m unittest -v
+
+  extension:
+    name: Extension (node)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: snapgent-extension
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Check service worker and popup syntax
+        run: |
+          node --check background.js
+          node --check popup.js
+      - name: Run smoke tests
+        run: |
+          set -euo pipefail
+          for test in test-*.js; do
+            echo "== $test"
+            node "$test"
+          done
