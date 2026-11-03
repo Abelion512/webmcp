@@ -109,15 +109,18 @@ def _effectcraft_running() -> bool:
         if sys.platform == "darwin"
         else [r"(^|/)EffectCraft(\.AppImage)?($| )", r"(^|/)effectcraft($| )"]
     )
-    return any(
-        subprocess.run(
-            ["pgrep", "-f", pattern],
-            capture_output=True,
-            text=True,
-            check=False,
-        ).returncode == 0
-        for pattern in patterns
-    )
+    for pattern in patterns:
+        try:
+            if subprocess.run(
+                ["pgrep", "-f", pattern],
+                capture_output=True,
+                text=True,
+                check=False,
+            ).returncode == 0:
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _start_effectcraft_control(app: Optional[Path]) -> None:
