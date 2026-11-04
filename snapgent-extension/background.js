@@ -36,6 +36,10 @@ let toolsCache = [];
 let mcpAlive = false;
 let serversCache = [];
 let bridgeVersion = null;
+// Last get_bridge_status payload from the bridge (sanitized: no log_tail
+// contents, see refreshBridgeStatus). null = old bridge or not fetched yet.
+let bridgeStatusCache = null;
+let bridgeStatusAt = 0; // Date.now() of the last successful fetch
 // true/false = a PLACE is loaded and usable in Roblox Studio; null = unknown.
 // The MCP process stays alive when Studio is closed or its MCP option is off,
 // so this is probed separately (bridge "studio_status").
@@ -78,6 +82,7 @@ function connect() {
     log("connected to bridge");
     startHeartbeat();
     broadcastStatus();
+    refreshBridgeStatus();
   };
 
   ws.onmessage = (ev) => {
@@ -99,6 +104,8 @@ function connect() {
     studioProc = null;
     serversCache = [];
     bridgeVersion = null;
+    bridgeStatusCache = null;
+    bridgeStatusAt = 0;
     stopHeartbeat();
     failAllPending("bridge connection closed");
     broadcastStatus();
@@ -209,6 +216,46 @@ async function refreshStudioStatus() {
   }
 }
 
+// Ask the bridge for its diagnostic snapshot (pid, RSS, restart attempts,
+// uptime). The log_tail lines are dropped here: the popup needs counts and
+// per-server health, not raw log text. An old bridge that does not know
+// the request answers with an error frame, which resolvePending maps to
+// ok:false - the cache simply stays null and the popup keeps its old UI.
+let bridgeStatusProbing = false;
+async function refreshBridgeStatus(force = false) {
+  if (bridgeStatusProbing || !connected) return;
+  if (!force && bridgeStatusCache && Date.now() - bridgeStatusAt < 5000) return;
+  bridgeStatusProbing = true;
+  try {
+    const r = await send({ type: "get_bridge_status" }, 12000);
+    if (r && r.ok && r.status && typeof r.status === "object") {
+      const s = r.status;
+      bridgeStatusCache = {
+        bridge_version: s.bridge_version || null,
+        uptime_seconds: typeof s.uptime_seconds === "number" ? s.uptime_seconds : null,
+        clients_connected: typeof s.clients_connected === "number" ? s.clients_connected : null,
+        tools_available: typeof s.tools_available === "number" ? s.tools_available : null,
+        servers: Array.isArray(s.servers) ? s.servers.map((x) => ({
+          id: String(x.id || "?"),
+          alive: !!x.alive,
+          ready: !!x.ready,
+          tools: typeof x.tools === "number" ? x.tools : 0,
+          pid: typeof x.pid === "number" ? x.pid : null,
+          error: typeof x.error === "string" ? x.error.slice(0, 120) : null,
+          restart_attempts: typeof x.restart_attempts === "number" ? x.restart_attempts : 0,
+          next_restart_in_seconds: typeof x.next_restart_in_seconds === "number" ? x.next_restart_in_seconds : 0,
+          rss_kib: typeof x.rss_kib === "number" ? x.rss_kib : null,
+        })) : [],
+        log_tail_lines: Array.isArray(s.log_tail) ? s.log_tail.length : 0,
+      };
+      bridgeStatusAt = Date.now();
+      broadcastStatus();
+    }
+  } finally {
+    bridgeStatusProbing = false;
+  }
+}
+
 function handleBridgeMessage(msg) {
   if ("studio" in msg && (typeof msg.studio === "boolean" || msg.studio === null)) {
     studioConnected = msg.studio;
@@ -230,6 +277,12 @@ function handleBridgeMessage(msg) {
     if (Array.isArray(msg.tools)) toolsCache = msg.tools;
     if (Array.isArray(msg.servers)) serversCache = msg.servers;
     broadcastStatus();
+    return;
+  }
+  if (msg.type === "bridge_status") {
+    // send() resolves via resolvePending below; refreshBridgeStatus stores
+    // the sanitized copy. This arm only feeds the pending request.
+    resolvePending(msg.id, { ok: true, status: msg.status });
     return;
   }
   if (msg.type === "pong") {
@@ -289,7 +342,7 @@ function failAllPending(reason) {
 
 // ── status push to any open DeepSeek tab + popup ─────────────────────────
 function statusObj() {
-  return { type: "zs-status", connected, mcpAlive, bridgeVersion, studio: studioConnected, studioApp, studioProc, tools: toolsCache.length, servers: serversCache };
+  return { type: "zs-status", connected, mcpAlive, bridgeVersion, bridgeStatus: bridgeStatusCache, studio: studioConnected, studioApp, studioProc, tools: toolsCache.length, servers: serversCache };
 }
 
 function broadcastStatus() {
@@ -305,6 +358,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     switch (msg.type) {
       case "status":
         if (!connected) connect(); // self-heal after a worker wake-up
+        else refreshBridgeStatus(); // stale-guarded (5 s), fire-and-forget
+        sendResponse(statusObj());
+        break;
+      case "bridge_status":
+        await refreshBridgeStatus(true);
         sendResponse(statusObj());
         break;
       case "list_tools": {

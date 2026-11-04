@@ -256,7 +256,8 @@ dead MCP servers with exponential backoff, and answers
 Start with [`docs/security-and-ops.md`](docs/security-and-ops.md) for
 the containment model, the `run_command` policy, bridge recovery, and
 how to diagnose a running bridge (including opt-in JSON logging with
-`ZS_BRIDGE_LOG_JSON=1`).
+`ZS_BRIDGE_LOG_JSON=1`). Code structure, naming, and test conventions
+are in [`docs/code-standards.md`](docs/code-standards.md).
 
 Tests: `/usr/bin/python3 -m pytest -q` (Python), `node
 snapgent-extension/test-*.js` (extension stub-DOM), and

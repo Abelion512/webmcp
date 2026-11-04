@@ -29,6 +29,15 @@ All notable changes to snapgentV3 Free are documented here.
   matching path labels in `labeler.yml`.
 - **`docs/security-and-ops.md`:** containment model, `run_command`
   policy, bridge recovery, and how to diagnose a running bridge.
+- **Extension UX for bridge diagnostics:** popup now renders
+  `get_bridge_status` per server (pid, RSS, uptime, retry countdown,
+  truncated error) with an old-bridge fallback. Background polls it
+  stale-guarded (5 s); `log_tail` contents are never sent to the popup.
+- **`docs/code-standards.md`** (PEP 8, Google Python, Clean Code,
+  Airbnb JS, test pyramid): repo structure, naming/function rules,
+  documented deviations, and an audit snapshot. Enforcement added:
+  `.editorconfig`, `pyproject.toml`, pyflakes + `node --check` in CI,
+  and `test-popup-status.js`. One pre-existing unused import removed.
 
 ### Changed
 - **MCP server renamed:** `vscode_mcp.py` is now `workspace_mcp.py`, a generic

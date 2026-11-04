@@ -42,6 +42,8 @@ ci:
   - changed-files:
       - any-glob-to-any-file:
           - .github/**
+          - pyproject.toml
+          - .editorconfig
           - "*.spec"
 
 tests:

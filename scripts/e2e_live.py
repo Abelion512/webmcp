@@ -190,7 +190,11 @@ async def run_checks(port):
             check("delete_file", r.get("ok") and not tmpfile.exists())
 
             r = await call(ws, 17, "git_status")
-            check("git_status", r.get("ok") and "linux-stability" in r.get("text", ""))
+            # Branch-agnostic: git status --short --branch first line is
+            # "## <branch>..."; hardcoding a branch name breaks on any
+            # other branch or detached HEAD in CI.
+            check("git_status",
+                  r.get("ok") and r.get("text", "").startswith("##"))
 
             # Restart #1: kill the subprocess; the next call restarts it inline.
             os.kill(pid1, signal.SIGKILL)
