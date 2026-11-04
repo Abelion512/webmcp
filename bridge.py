@@ -24,7 +24,7 @@ if getattr(sys, "frozen", False):
     ROOT = Path(sys.executable).resolve().parent
 else:
     ROOT = Path(__file__).resolve().parent
-CONFIG_PATH = ROOT / "config.json"
+CONFIG_PATH = Path(os.environ.get("ZS_BRIDGE_CONFIG", str(ROOT / "config.json")))
 LOG_PATH = ROOT / "logs" / "bridge_debug.log"
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("ZS_BRIDGE_PORT", "17613"))

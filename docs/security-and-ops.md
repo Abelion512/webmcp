@@ -104,6 +104,11 @@ Structured JSON logging is opt-in:
 ZS_BRIDGE_LOG_JSON=1 python3 bridge.py
 ```
 
+The bridge config path can be overridden with `ZS_BRIDGE_CONFIG`
+(default `config.json` next to `bridge.py`). `scripts/e2e_live.py`
+uses a temporary config this way, because `config.json` is gitignored
+and a CI checkout has no configured servers otherwise.
+
 Each line becomes one JSON object: `{"ts": "...", "level": "INFO",
 "message": "..."}`. Do not enable it if anything downstream parses the
 text format.
