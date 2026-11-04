@@ -77,7 +77,7 @@ if ! "$PY" -c "import websockets" >/dev/null 2>&1; then
     pause_and_exit 1
 fi
 
-echo "  [3/4] Detecting VS Code, Roblox Studio, and EffectCraft..."
+echo "  [3/4] Writing the MCP configuration..."
 if ! "$PY" "./setup-config.py"; then
     echo "  ERROR: MCP configuration failed. See the message above."
     log "MCP auto-configuration failed."
@@ -103,7 +103,21 @@ if command -v lsof >/dev/null 2>&1; then
                 ;;
         esac
     done
-    if [ -n "${OLD_PIDS:-}" ]; then sleep 1; fi
+    if [ -n "${OLD_PIDS:-}" ]; then
+        # Wait for the old bridge to release the port; a hard sleep is too short
+        # when shutdown is slow, too long when it is fast. Poll up to 10 seconds.
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+            if ! lsof -ti "tcp:$BRIDGE_PORT" -s TCP:LISTEN >/dev/null 2>&1; then
+                break
+            fi
+            sleep 1
+        done
+        if lsof -ti "tcp:$BRIDGE_PORT" -s TCP:LISTEN >/dev/null 2>&1; then
+            echo "  ERROR: port $BRIDGE_PORT still in use after 10 seconds."
+            log "FATAL: port $BRIDGE_PORT not released by previous bridge."
+            pause_and_exit 1
+        fi
+    fi
 fi
 
 echo

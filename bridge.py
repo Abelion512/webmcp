@@ -7,10 +7,7 @@ import logging
 import os
 import re
 import signal
-import socket
-import subprocess
 import sys
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -284,7 +281,6 @@ class Bridge:
         self.clients = set()
         self._client_lock = asyncio.Lock()
         self._catalog: List[Dict[str, Any]] = []
-        self._last_studio: Optional[bool] = None
 
     def load_config(self) -> Dict[str, Dict[str, Any]]:
         if not CONFIG_PATH.exists():
@@ -418,18 +414,6 @@ class Bridge:
         kind = request.get("type")
         if kind == "ping":
             await self._send_client(websocket, {"type": "pong", "id": request_id})
-        elif kind == "studio_status":
-            studio, studio_app, studio_proc = await self._studio_status()
-            await self._send_client(
-                websocket,
-                {
-                    "type": "studio_status",
-                    "id": request_id,
-                    "studio": studio,
-                    "studio_app": studio_app,
-                    "studio_proc": studio_proc,
-                },
-            )
         elif kind == "list_tools":
             await self._send_client(
                 websocket,
@@ -578,30 +562,6 @@ class Bridge:
             return matches[0][0], name
         return None, name
 
-    async def _studio_status(self) -> Tuple[Optional[bool], Optional[bool], Optional[bool]]:
-        studio_server = self.servers.get("roblox")
-        studio_proc = _process_running("RobloxStudioBeta.exe" if os.name == "nt" else "RobloxStudio")
-        if not studio_server or not studio_server.alive:
-            return None, None, studio_proc
-        if not any(tool["name"] == "get_studio_state" for tool in studio_server.tools):
-            return None, None, studio_proc
-        try:
-            result = await studio_server.call_tool("get_studio_state", {}, 8)
-        except (asyncio.TimeoutError, RuntimeError, OSError, ValueError):
-            return False, studio_proc, studio_proc
-        text = " ".join(
-            item.get("text", "")
-            for item in result.get("content", [])
-            if isinstance(item, dict) and isinstance(item.get("text"), str)
-        )
-        if result.get("isError") or re.search(
-            r"Unable to find an active Studio instance|previously active Studio has disconnected",
-            text,
-            re.IGNORECASE,
-        ):
-            return False, studio_proc, studio_proc
-        return True, True, studio_proc
-
     async def _change_server(
         self, websocket: Any, request: Dict[str, Any], remove: bool
     ) -> None:
@@ -609,7 +569,6 @@ class Bridge:
         server_id = request.get("server_id")
         if (
             not isinstance(server_id, str)
-            or server_id == "roblox"
             or not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", server_id)
         ):
             await self._send_client(
@@ -617,14 +576,14 @@ class Bridge:
                 {"type": "server_changed", "id": request_id, "ok": False, "error": "Invalid or protected MCP server id."},
             )
             return
+        old_config: Optional[str] = None
         try:
             config = json.loads(CONFIG_PATH.read_text(encoding="utf-8")) if CONFIG_PATH.exists() else {}
+            old_config = CONFIG_PATH.read_text(encoding="utf-8") if CONFIG_PATH.exists() else None
             servers = config.setdefault("mcpServers", {})
             if not isinstance(servers, dict):
                 raise RuntimeError("mcpServers must be a JSON object.")
             if remove:
-                if server_id == "vscode":
-                    raise RuntimeError("The VS Code MCP server cannot be removed.")
                 servers.pop(server_id, None)
             else:
                 command = request.get("command")
@@ -637,10 +596,10 @@ class Bridge:
                 if not isinstance(env, dict) or not all(isinstance(k, str) for k in env):
                     raise RuntimeError("MCP server env must be an object.")
                 servers[server_id] = {"command": command, "args": args, "env": env}
+            await self.stop_servers()
             temp_path = CONFIG_PATH.with_suffix(".json.tmp")
             temp_path.write_text(json.dumps(config, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
             temp_path.replace(CONFIG_PATH)
-            await self.stop_servers()
             await self.start_servers()
             await self._send_client(
                 websocket,
@@ -648,37 +607,14 @@ class Bridge:
             )
             await self.broadcast(self._connected_message())
         except (OSError, json.JSONDecodeError, RuntimeError) as error:
+            if old_config is not None:
+                CONFIG_PATH.write_text(old_config, encoding="utf-8")
+            elif CONFIG_PATH.exists():
+                CONFIG_PATH.unlink()
             await self._send_client(
                 websocket,
                 {"type": "server_changed", "id": request_id, "ok": False, "error": str(error)},
             )
-
-
-def _process_running(process_name: str) -> Optional[bool]:
-    try:
-        if os.name == "nt":
-            result = subprocess_run(
-                ["tasklist", "/FI", f"IMAGENAME eq {process_name}", "/NH"],
-                timeout=5,
-            )
-            return process_name.lower() in result.lower()
-        result = subprocess_run(["pgrep", "-f", process_name], timeout=5)
-        return bool(result.strip())
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-
-
-def subprocess_run(command: List[str], timeout: int) -> str:
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=timeout,
-        check=False,
-    )
-    return result.stdout
 
 
 async def run() -> None:
