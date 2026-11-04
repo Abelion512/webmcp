@@ -1,15 +1,17 @@
 name: Label pull requests
 
+# pull_request (not pull_request_target) because pull_request_target only ever
+# runs the workflow from the default branch, and this repository does its work on
+# linux-stability. Fork PRs are skipped: their GITHUB_TOKEN is read-only, so the
+# labeling step would fail instead of quietly doing nothing.
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
 
-# pull_request_target so forked PRs can be labelled too. The action only reads
-# PR metadata and the base branch's .github/labeler.yml, and nothing from the PR
-# is checked out, so the write token is never exposed to untrusted code.
 jobs:
   label:
     name: Apply path labels
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     permissions:
       contents: read
