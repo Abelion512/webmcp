@@ -285,6 +285,38 @@ class BridgeAuthTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(json.loads(await fresh.recv())["type"], "connected")
 
     @unittest.skipIf(bridge.websockets is None, "websockets package is not installed")
+    async def test_rotation_refuses_the_old_token_even_for_the_client_that_rotated(self):
+        # The session that rotates is closed too (1012), so a token leaked to that
+        # client must not survive: dialing back in with the old value is a 1008.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "bridge_token"
+            with patch.dict(os.environ, {bridge.TOKEN_PATH_ENV: str(path)}, clear=False):
+                os.environ.pop(bridge.TOKEN_ENV, None)
+                os.environ.pop(bridge.AUTH_DISABLE_ENV, None)
+                manager = bridge.Bridge("leaked-token")
+                async with bridge.websockets.serve(manager.handle_client, "127.0.0.1", 0) as server:
+                    port = server.sockets[0].getsockname()[1]
+                    base = f"ws://127.0.0.1:{port}"
+                    async with bridge.websockets.connect(f"{base}/?token=leaked-token") as client:
+                        self.assertEqual(json.loads(await client.recv())["type"], "connected")
+                        await client.send(json.dumps({"type": "rotate_token", "id": 4}))
+                        reply = json.loads(await client.recv())
+                        self.assertTrue(reply["ok"], reply)
+                        with self.assertRaises(bridge.websockets.exceptions.ConnectionClosed) as closed:
+                            await client.recv()
+                        self.assertEqual(closed.exception.code, bridge.ROTATE_CLOSE_CODE)
+                    new_token = reply["token"]
+                    self.assertNotEqual(new_token, "leaked-token")
+                    self.assertEqual(path.read_text(encoding="utf-8").strip(), new_token)
+
+                    async with bridge.websockets.connect(f"{base}/?token=leaked-token") as stale:
+                        with self.assertRaises(bridge.websockets.exceptions.ConnectionClosed) as ctx:
+                            await stale.recv()
+                        self.assertEqual(ctx.exception.code, 1008)
+                    async with bridge.websockets.connect(f"{base}/?token={new_token}") as fresh:
+                        self.assertEqual(json.loads(await fresh.recv())["type"], "connected")
+
+    @unittest.skipIf(bridge.websockets is None, "websockets package is not installed")
     async def test_rotation_revokes_every_authenticated_connection(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "bridge_token"

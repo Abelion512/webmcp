@@ -193,7 +193,8 @@ The extension keeps the token in `chrome.storage.local`. **🔑 Rotate token** (
 while connected) asks the bridge for a new secret and saves it on both sides; the
 bridge then closes every authenticated connection, so a leaked token cannot keep a
 live session. The extension reconnects with the new value by itself — no restart
-needed. **🗝 Forget saved token** clears the stored copy and shows the pairing field
+needed, and the popup reads `Token rotated · reconnecting` for that second instead of
+`Bridge offline`. **🗝 Forget saved token** clears the stored copy and shows the pairing field
 again.
 
 Advanced: `ZS_BRIDGE_TOKEN_FILE` moves the token file, `ZS_BRIDGE_TOKEN` pins an exact

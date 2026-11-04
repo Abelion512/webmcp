@@ -34,6 +34,7 @@ const REQUEST_TIMEOUT_DEFAULT = 130000; // a bit above the 120s tool timeout
 let ws = null;
 let connected = false;
 let authRequired = false; // bridge closed us with 1008: token missing or wrong
+let rotatingToken = false; // bridge closed us with 1012: token changed, reconnecting
 let bridgeToken = null; // cached chrome.storage value; null = not read yet
 let connecting = false;
 let reconnectDelay = RECONNECT_MIN;
@@ -102,6 +103,7 @@ async function connect() {
   ws.onopen = () => {
     connected = true;
     authRequired = false;
+    rotatingToken = false;
     reconnectDelay = RECONNECT_MIN;
     lastMessageAt = Date.now();
     log("connected to bridge");
@@ -123,6 +125,7 @@ async function connect() {
   ws.onclose = (ev) => {
     connected = false;
     authRequired = ZSPairing.isAuthClose(ev);
+    rotatingToken = ZSPairing.isRotationClose(ev);
     mcpAlive = false;
     studioConnected = null;
     studioApp = null;
@@ -319,7 +322,7 @@ function failAllPending(reason) {
 
 // ── status push to any open DeepSeek tab + popup ─────────────────────────
 function statusObj() {
-  return { type: "zs-status", connected, authRequired, savedToken: !!bridgeToken, mcpAlive, bridgeVersion, studio: studioConnected, studioApp, studioProc, tools: toolsCache.length, servers: serversCache };
+  return { type: "zs-status", connected, authRequired, rotatingToken, savedToken: !!bridgeToken, mcpAlive, bridgeVersion, studio: studioConnected, studioApp, studioProc, tools: toolsCache.length, servers: serversCache };
 }
 
 function broadcastStatus() {

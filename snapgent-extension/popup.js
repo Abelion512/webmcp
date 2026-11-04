@@ -19,12 +19,15 @@ function render(s) {
   const studioOff = mcpOk && s.studio === false; // MCP up but no Studio attached
   const ok = mcpOk && !studioOff;
   const dot = document.getElementById("dot");
-  dot.className = "dot " + (!s.connected ? "bad" : ok ? "ok" : "warn");
+  dot.className = "dot " + (!s.connected ? (s.rotatingToken ? "warn" : "bad") : ok ? "ok" : "warn");
   state.textContent = s.connected
     ? (ok ? "Connected"
         : studioOff ? "No Studio"
         : "Open Studio")
     : s.authRequired ? "Bridge token required"
+    // 1012: the bridge rotated the token and dropped us on purpose; the new one
+    // is already stored, so this is a reconnect, not a pairing problem.
+    : s.rotatingToken ? "Token rotated · reconnecting"
     : "Bridge offline";
   // Only prompt for the token while the bridge is actively refusing us.
   document.getElementById("pair").hidden = !(s.authRequired && !s.connected);
@@ -40,6 +43,7 @@ function render(s) {
   tools.textContent = s.connected
     ? `${s.tools || 0} tools`
     : s.authRequired ? "Paste the token below"
+    : s.rotatingToken ? "New token saved"
     : "Run start.bat";
   servers.textContent = s.connected
     ? list.map((x) => `${x.alive ? "●" : "○"} ${x.id} (${x.alive ? x.tools + " tools" : "down"})`).join("\n")

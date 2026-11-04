@@ -27,3 +27,11 @@ ok("1006 network drop is not a pairing problem", ZSPairing.isAuthClose({ code: 1
 ok("1012 token rotation is not a pairing problem", ZSPairing.isAuthClose({ code: 1012 }) === false);
 ok("1000 clean close is not a pairing problem", ZSPairing.isAuthClose({ code: 1000 }) === false);
 ok("missing event is not a pairing problem", ZSPairing.isAuthClose(null) === false && ZSPairing.isAuthClose(undefined) === false);
+
+// --- rotation close classification --------------------------------------
+// 1012 means the bridge rotated and hung up on purpose, so the popup shows a
+// reconnect instead of the pairing card while the extension dials back in.
+ok("1012 is a rotation reconnect", ZSPairing.isRotationClose({ code: 1012 }) === true);
+ok("1008 is not a rotation reconnect", ZSPairing.isRotationClose({ code: 1008 }) === false);
+ok("1006 is not a rotation reconnect", ZSPairing.isRotationClose({ code: 1006 }) === false);
+ok("missing event is not a rotation reconnect", ZSPairing.isRotationClose(null) === false && ZSPairing.isRotationClose(undefined) === false);

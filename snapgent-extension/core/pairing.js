@@ -18,5 +18,12 @@ const ZSPairing = (() => {
     return !!event && event.code === 1008;
   }
 
-  return { bridgeUrl, isAuthClose };
+  // 1012 = the bridge rotated its token and closed every authenticated socket on
+  // purpose. Not a pairing failure: the new token is already stored, so the popup
+  // reports a reconnect instead of showing the pairing card.
+  function isRotationClose(event) {
+    return !!event && event.code === 1012;
+  }
+
+  return { bridgeUrl, isAuthClose, isRotationClose };
 })();
