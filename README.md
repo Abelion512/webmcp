@@ -238,17 +238,41 @@ snapgent-full/
 ├── test_bridge.py             # MCP bridge protocol tests
 ├── test_setup_config.py       # MCP setup helper tests
 ├── test_workspace_mcp.py      # Workspace MCP server tests
+├── scripts/e2e_live.py        # Live e2e: real bridge + subprocess on an ephemeral port
 └── sync-upstream.sh           # Sync with upstream, keeping purged paths deleted
 ```
 
 ---
 
-## `08` &nbsp; Troubleshooting
+## `08` &nbsp; Security & operations
+
+Every workspace tool is scoped to `ZS_WORKSPACE_ROOT`, with a
+resolve-check on every traversed entry so symlinks cannot leak files
+from outside the root. `run_command` blocks privilege-escalation and
+raw-disk binaries and caps its timeout at 300 s. The bridge restarts
+dead MCP servers with exponential backoff, and answers
+`get_bridge_status` with per-server pid, restart attempts, and RSS.
+
+Start with [`docs/security-and-ops.md`](docs/security-and-ops.md) for
+the containment model, the `run_command` policy, bridge recovery, and
+how to diagnose a running bridge (including opt-in JSON logging with
+`ZS_BRIDGE_LOG_JSON=1`). Code structure, naming, and test conventions
+are in [`docs/code-standards.md`](docs/code-standards.md).
+
+Tests: `/usr/bin/python3 -m pytest -q` (Python), `node
+snapgent-extension/test-*.js` (extension stub-DOM), and
+`/usr/bin/python3 scripts/e2e_live.py` (live bridge + subprocess).
+GitHub Actions runs the same suites on every push/PR.
+
+---
+
+## `09` &nbsp; Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | snapgentV3 bar is missing | Extension is disabled or site access is blocked | Check the extension is enabled and allowed on the current AI chat site, then reload the tab |
 | Bridge is offline | Bridge is not running | Run `bash Linux_Start.sh` (Linux) |
+| MCP server keeps dying / tools fail after a while | Subprocess crashed; the bridge restarts it with backoff (5 s → 300 s) | Send `get_bridge_status` over the WebSocket and check `restart_attempts`, `error`, and `log_tail` (see `docs/security-and-ops.md`) |
 | AI replies without using tools | Provider/model stopped following commands | Remind it to use snapgentV3 commands or start a new chat |
 | A configured MCP server is missing from the target dropdown | The server was switched off in the **MCP servers** panel, or the extension is outdated | Open **MCP servers** from the ⋯ menu on the snapgent bar and tick the server, then reload the extension in `chrome://extensions` and refresh the chat tab |
 | Target dropdown closes or the click does nothing | Older extension versions redrew the menu during status updates | Update to the latest release and reload the extension |

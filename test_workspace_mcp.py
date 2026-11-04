@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -113,6 +114,52 @@ class WorkspaceMcpTests(unittest.TestCase):
             (self.workspace / "duplicate.txt").read_text(encoding="utf-8"),
             "new new",
         )
+
+    def test_symlink_traversal_does_not_leak_external_files(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "secret.txt").write_text("TOPSECRET\n", encoding="utf-8")
+        (outside / "sub").mkdir()
+        (outside / "sub" / "deep.txt").write_text("DEEPSECRET\n", encoding="utf-8")
+        os.symlink(outside / "secret.txt", self.workspace / "link.txt")
+        os.symlink(outside / "sub", self.workspace / "linkdir")
+        os.symlink(outside, self.workspace / "linkroot")
+        # Traversal (find/search/tree/list) must not surface external content.
+        self.assertEqual(workspace_mcp.find_files(".", "*"), [])
+        self.assertEqual(workspace_mcp.search_files(".", "TOPSECRET"), [])
+        self.assertEqual(workspace_mcp.search_files(".", "DEEPSECRET"), [])
+        self.assertEqual(workspace_mcp.list_tree("."), [])
+        self.assertEqual(workspace_mcp.list_dir("."), [])
+        # Direct read was already blocked by normalize_target; keep it so.
+        with self.assertRaises(ValueError):
+            workspace_mcp.read_file("link.txt")
+
+    def test_internal_symlink_is_still_traversable(self):
+        workspace_mcp.create_file("real.txt", "inside content\n")
+        os.symlink(self.workspace / "real.txt", self.workspace / "alias.txt")
+        self.assertIn("real.txt", workspace_mcp.find_files(".", "*.txt"))
+        self.assertIn("alias.txt", workspace_mcp.find_files(".", "*.txt"))
+        self.assertEqual(len(workspace_mcp.search_files(".", "inside content")), 2)
+
+    def test_run_command_blocks_dangerous_binaries(self):
+        for command in ("sudo", "/usr/bin/sudo", "dd", "mkfs.ext4", "shutdown"):
+            with self.assertRaises(ValueError, msg=command):
+                workspace_mcp.run_command(command, ["-h"])
+
+    def test_run_command_timeout_bounds(self):
+        with self.assertRaises(ValueError):
+            workspace_mcp.run_command("echo", ["hi"], timeout=1)
+        with self.assertRaises(ValueError):
+            workspace_mcp.run_command("echo", ["hi"], timeout=9999)
+        with self.assertRaises(ValueError):
+            workspace_mcp.run_command("echo", ["hi"], timeout="soon")  # type: ignore[arg-type]
+        self.assertEqual(workspace_mcp.run_command("echo", ["hi"], timeout=10), "hi")
+        # Default (no timeout) still works.
+        self.assertEqual(workspace_mcp.run_command("echo", ["ok"]), "ok")
+
+    def test_run_command_rejects_non_string_args(self):
+        with self.assertRaises(ValueError):
+            workspace_mcp.run_command("echo", [123])  # type: ignore[list-item]
 
 
 if __name__ == "__main__":
