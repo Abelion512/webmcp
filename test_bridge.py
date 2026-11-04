@@ -217,6 +217,38 @@ class PromptDelegationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["ok"])
         self.assertIn("disconnected", result["error"])
 
+    async def test_submit_prompt_ignores_a_foreign_socket(self):
+        manager = bridge.Bridge()
+        owner = FakeClient()
+        rogue = FakeClient()
+        manager.clients.update({owner, rogue})
+        manager._last_client = owner
+        task = asyncio.create_task(manager.submit_prompt("hello", 5))
+        await self._await_send(owner)
+        # The rogue must not be able to resolve someone else's task.
+        await manager._handle_request(
+            rogue,
+            {
+                "id": 9,
+                "type": "prompt_result",
+                "prompt_id": owner.sent[0]["id"],
+                "ok": True,
+                "text": "spoofed",
+            },
+        )
+        self.assertFalse(task.done())
+        await manager._handle_request(
+            owner,
+            {
+                "id": 10,
+                "type": "prompt_result",
+                "prompt_id": owner.sent[0]["id"],
+                "ok": True,
+                "text": "real",
+            },
+        )
+        self.assertEqual(await asyncio.wait_for(task, 2), {"ok": True, "text": "real"})
+
     def test_build_a2a_server_takes_token_from_env(self):
         with patch.dict("os.environ", {"ZS_A2A_TOKEN": "tok", "ZS_A2A_PORT": "0"}):
             server = bridge.build_a2a_server(bridge.Bridge(), asyncio.new_event_loop())

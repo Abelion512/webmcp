@@ -236,6 +236,12 @@ Run: `python3 -m unittest` and `node snapgent-extension/test-a2a.js`.
 
 ## Risks
 
+- The extension websocket on `ws://127.0.0.1:17613` is **not authenticated**.
+  Any local process can connect to it. The A2A facade mitigates this by sending
+  `submit_prompt` to a single socket and resolving a task only from the socket
+  that received it, but it cannot stop a local process from connecting at all.
+  This is pre-existing bridge behaviour; authenticating the extension socket is
+  the real fix and is out of scope here.
 - The browser tab must be the foreground tab of its window. A backgrounded tab
   pauses the loop. Same constraint as the existing bridge, now exposed to A2A
   clients.

@@ -112,7 +112,7 @@ The `result` is a `Task`:
     ],
     "history": [
       {"messageId": "msg-1", "role": "ROLE_USER", "parts": [{"text": "List the files ..."}]},
-      {"messageId": "msg-f2bccf3726c441ba8fa4bb1553f532a5", "role": "ROLE_AGENT", "parts": [{"text": "..."}]}
+      {"messageId": "msg-f2bccf3726c441ba8fa4bb1553f532a5", "role": "ROLE_AGENT", "parts": [{"text": "..."}], "taskId": "task-5cdc4ad575f040eba418350128c09d1a", "contextId": "ctx-0bb3f629efdd469085d1ed742d3070c1"}
     ],
     "metadata": {}
   }

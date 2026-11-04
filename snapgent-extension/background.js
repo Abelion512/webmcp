@@ -229,7 +229,10 @@ function handleBridgeMessage(msg) {
     return;
   }
   if (msg.type === "prompt_ack") {
-    return; // fire-and-forget relay: nothing to resolve
+    // Ack of OUR prompt_result send: clear its pending entry now instead of
+    // waiting out the 15s request timeout.
+    resolvePending(msg.id, { ok: true });
+    return;
   }
   if (msg.type === "connected") {
     bridgeVersion = typeof msg.bridge_version === "string" ? msg.bridge_version : null;

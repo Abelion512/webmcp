@@ -287,6 +287,11 @@ class Bridge:
         # A2A delegation: one browser tab, one generation.
         self._pending_prompts: Dict[str, asyncio.Future] = {}
         self._prompt_lock = asyncio.Lock()
+        # The socket a pending prompt belongs to. Only that socket may resolve it:
+        # the extension websocket is unauthenticated, so a second local socket must
+        # not be able to spoof a reply.
+        self._prompt_owner: Any = None
+        self._last_client: Any = None
 
     def load_config(self) -> Dict[str, Dict[str, Any]]:
         if not CONFIG_PATH.exists():
@@ -399,27 +404,50 @@ class Bridge:
             if not future.done():
                 future.set_result({"ok": False, "error": reason})
         self._pending_prompts.clear()
+        self._prompt_owner = None
 
     async def submit_prompt(self, prompt: str, timeout: float) -> Dict[str, Any]:
-        """Delegate one prompt to the browser extension. Single-flight."""
+        """Delegate one prompt to the browser extension. Single-flight.
+
+        The deadline covers the queue wait too: a second task that waits for the
+        lock must not start a generation the caller has already given up on.
+        """
         if not isinstance(prompt, str) or not prompt.strip():
             return {"ok": False, "error": "Empty prompt."}
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        timed_out = {"ok": False, "error": f"The web AI did not answer within {int(timeout)}s."}
         async with self._prompt_lock:
-            if not self.clients:
-                return {"ok": False, "error": "No Snapgent extension is connected."}
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return timed_out
+            async with self._client_lock:
+                if self._last_client in self.clients:
+                    client = self._last_client
+                else:
+                    client = next(iter(self.clients), None)
+                if client is None:
+                    return {"ok": False, "error": "No Snapgent extension is connected."}
             prompt_id = f"p{uuid.uuid4().hex}"
-            future: asyncio.Future = asyncio.get_running_loop().create_future()
+            future: asyncio.Future = loop.create_future()
             self._pending_prompts[prompt_id] = future
-            await self.broadcast({"type": "submit_prompt", "id": prompt_id, "prompt": prompt})
+            self._prompt_owner = client
             try:
-                return await asyncio.wait_for(future, timeout)
+                await self._send_client(client, {"type": "submit_prompt", "id": prompt_id, "prompt": prompt})
+                return await asyncio.wait_for(future, remaining)
             except asyncio.TimeoutError:
-                return {"ok": False, "error": f"The web AI did not answer within {int(timeout)}s."}
+                return timed_out
             finally:
                 self._pending_prompts.pop(prompt_id, None)
+                if self._prompt_owner is client:
+                    self._prompt_owner = None
 
     async def _resolve_prompt(self, websocket: Any, request: Dict[str, Any]) -> None:
         prompt_id = request.get("prompt_id")
+        # Only the socket the prompt was sent to may resolve it.
+        if websocket is not self._prompt_owner:
+            await self._send_client(websocket, {"type": "prompt_ack", "id": request.get("id")})
+            return
         future = self._pending_prompts.pop(prompt_id, None) if isinstance(prompt_id, str) else None
         if future is not None and not future.done():
             if request.get("ok"):
@@ -431,6 +459,7 @@ class Bridge:
     async def handle_client(self, websocket: Any, _path: Optional[str] = None) -> None:
         async with self._client_lock:
             self.clients.add(websocket)
+            self._last_client = websocket
         log("extension connected")
         await self._send_client(websocket, self._connected_message())
         try:
@@ -671,13 +700,13 @@ def build_a2a_server(bridge: "Bridge", loop: asyncio.AbstractEventLoop) -> Any:
     except ValueError:
         timeout_ms = a2a_server.DEFAULT_TIMEOUT_MS
     token = os.environ.get("ZS_A2A_TOKEN") or secrets.token_urlsafe(32)
-    timeout = timeout_ms / 1000.0
 
     def submit(prompt: str, task_timeout: float) -> Dict[str, Any]:
         future = asyncio.run_coroutine_threadsafe(bridge.submit_prompt(prompt, task_timeout), loop)
         try:
             return future.result(task_timeout + 60)
         except concurrent.futures.TimeoutError:
+            future.cancel()
             return {"ok": False, "error": "Timed out waiting for the browser bridge."}
 
     server = a2a_server.A2AServer(
@@ -715,7 +744,10 @@ async def run() -> None:
             a2a = build_a2a_server(bridge, loop)
             a2a.start()
             log(f"A2A agent card: http://{HOST}:{a2a.port}/.well-known/agent-card.json")
-            log(f"A2A bearer token: {a2a.token}")
+            # Token goes to the terminal only, never to the log file: the file is
+            # world-readable by default and this token gates an RPC that can write
+            # workspace files.
+            print(f"A2A bearer token: {a2a.token} (set ZS_A2A_TOKEN to pin it)", flush=True)
         except OSError as error:
             log(f"A2A server disabled: {error}")
             a2a = None
