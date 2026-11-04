@@ -71,6 +71,8 @@ The default target. Connects to the workspace folder you configure with `ZS_WORK
 
 The workspace MCP server is configured locally by `setup-config.py`; it runs in the folder you set with `ZS_WORKSPACE_ROOT`.
 
+To delegate a prompt to the same chat from a local A2A client, see `docs/a2a.md`.
+
 ---
 
 ## Snapgent App (standalone, Windows)
