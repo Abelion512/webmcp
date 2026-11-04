@@ -46,6 +46,14 @@ for line in sys.stdin:
 """
 
 
+class FakeClient:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, payload):
+        self.sent.append(json.loads(payload))
+
+
 class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_stdio_mcp_start_list_call_and_stop(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -162,6 +170,57 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIs(manager._resolve_tool("beta/get_state")[0], second)
         self.assertIsNone(manager._resolve_tool("get_state")[0])
+
+
+class PromptDelegationTests(unittest.IsolatedAsyncioTestCase):
+    async def _await_send(self, client):
+        for _ in range(200):
+            if client.sent:
+                return
+            await asyncio.sleep(0.01)
+        self.fail("the bridge never broadcast the prompt")
+
+    async def test_submit_prompt_resolves_on_prompt_result(self):
+        manager = bridge.Bridge()
+        client = FakeClient()
+        manager.clients.add(client)
+        task = asyncio.create_task(manager.submit_prompt("hello", 5))
+        await self._await_send(client)
+        self.assertEqual(client.sent[0]["type"], "submit_prompt")
+        self.assertEqual(client.sent[0]["prompt"], "hello")
+        await manager._handle_request(
+            client,
+            {
+                "id": 7,
+                "type": "prompt_result",
+                "prompt_id": client.sent[0]["id"],
+                "ok": True,
+                "text": "world",
+            },
+        )
+        self.assertEqual(await asyncio.wait_for(task, 2), {"ok": True, "text": "world"})
+
+    async def test_submit_prompt_requires_extension(self):
+        result = await bridge.Bridge().submit_prompt("hello", 1)
+        self.assertFalse(result["ok"])
+        self.assertIn("extension", result["error"])
+
+    async def test_submit_prompt_fails_when_extension_disconnects(self):
+        manager = bridge.Bridge()
+        client = FakeClient()
+        manager.clients.add(client)
+        task = asyncio.create_task(manager.submit_prompt("hello", 5))
+        await self._await_send(client)
+        manager.clients.discard(client)
+        manager._fail_pending_prompts("The extension disconnected.")
+        result = await asyncio.wait_for(task, 2)
+        self.assertFalse(result["ok"])
+        self.assertIn("disconnected", result["error"])
+
+    def test_build_a2a_server_takes_token_from_env(self):
+        with patch.dict("os.environ", {"ZS_A2A_TOKEN": "tok", "ZS_A2A_PORT": "0"}):
+            server = bridge.build_a2a_server(bridge.Bridge(), asyncio.new_event_loop())
+        self.assertEqual(server.token, "tok")
 
 
 if __name__ == "__main__":
