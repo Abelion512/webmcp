@@ -576,8 +576,10 @@ class Bridge:
                 {"type": "server_changed", "id": request_id, "ok": False, "error": "Invalid or protected MCP server id."},
             )
             return
+        old_config: Optional[str] = None
         try:
             config = json.loads(CONFIG_PATH.read_text(encoding="utf-8")) if CONFIG_PATH.exists() else {}
+            old_config = CONFIG_PATH.read_text(encoding="utf-8") if CONFIG_PATH.exists() else None
             servers = config.setdefault("mcpServers", {})
             if not isinstance(servers, dict):
                 raise RuntimeError("mcpServers must be a JSON object.")
@@ -594,10 +596,10 @@ class Bridge:
                 if not isinstance(env, dict) or not all(isinstance(k, str) for k in env):
                     raise RuntimeError("MCP server env must be an object.")
                 servers[server_id] = {"command": command, "args": args, "env": env}
+            await self.stop_servers()
             temp_path = CONFIG_PATH.with_suffix(".json.tmp")
             temp_path.write_text(json.dumps(config, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
             temp_path.replace(CONFIG_PATH)
-            await self.stop_servers()
             await self.start_servers()
             await self._send_client(
                 websocket,
@@ -605,6 +607,10 @@ class Bridge:
             )
             await self.broadcast(self._connected_message())
         except (OSError, json.JSONDecodeError, RuntimeError) as error:
+            if old_config is not None:
+                CONFIG_PATH.write_text(old_config, encoding="utf-8")
+            elif CONFIG_PATH.exists():
+                CONFIG_PATH.unlink()
             await self._send_client(
                 websocket,
                 {"type": "server_changed", "id": request_id, "ok": False, "error": str(error)},
