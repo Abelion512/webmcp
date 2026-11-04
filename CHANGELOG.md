@@ -4,6 +4,18 @@ All notable changes to snapgentV3 Free are documented here.
 
 ## [Unreleased]
 
+### Added
+- **A2A server facade:** `a2a_server.py` exposes the web AI chat as an A2A 1.0
+  agent on `http://127.0.0.1:17614` (Agent Card, JSON-RPC 2.0, tasks, SSE
+  streaming, bearer-token auth). The bridge starts and stops it in the same
+  process and prints the URL and token at startup.
+- **Bridge `submit_prompt`:** single-flight prompt delegation from the A2A
+  server to the extension, with a 10-minute default timeout.
+- **Extension relay:** `background.js` forwards a bridge prompt to the active
+  provider tab and relays the result back; `core/main.js` runs the prompt
+  through the existing agentic loop.
+- **Docs and skill:** `docs/a2a.md` plus `.snapgent/skills/a2a-bridge/SKILL.md`.
+
 ### Changed
 - **MCP server renamed:** `vscode_mcp.py` is now `workspace_mcp.py`, a generic
   stdio MCP file server scoped to one directory.

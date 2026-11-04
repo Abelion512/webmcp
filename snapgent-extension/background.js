@@ -224,6 +224,16 @@ function handleBridgeMessage(msg) {
     broadcastStatus();
     return;
   }
+  if (msg.type === "submit_prompt") {
+    handleSubmitPrompt(msg);
+    return;
+  }
+  if (msg.type === "prompt_ack") {
+    // Ack of OUR prompt_result send: clear its pending entry now instead of
+    // waiting out the 15s request timeout.
+    resolvePending(msg.id, { ok: true });
+    return;
+  }
   if (msg.type === "connected") {
     bridgeVersion = typeof msg.bridge_version === "string" ? msg.bridge_version : null;
     mcpAlive = !!msg.mcp_alive;
@@ -268,6 +278,42 @@ function handleBridgeMessage(msg) {
   if (msg.type === "error") {
     resolvePending(msg.id, { ok: false, error: msg.error });
     return;
+  }
+}
+
+// Relay a bridge prompt to the active provider tab. Fire-and-forget: the
+// content script answers later via an "a2a_result" runtime message. An MV3
+// worker eviction between the two hops is expected and handled by reconnect.
+async function handleSubmitPrompt(msg) {
+  const promptId = msg.id;
+  const reply = (payload) =>
+    send({ type: "prompt_result", prompt_id: promptId, ok: !!payload.ok,
+           text: payload.text || "", error: payload.error || "" }, 15000);
+  try {
+    let tabs = await chrome.tabs.query({ url: PROVIDER_URLS, active: true, lastFocusedWindow: true });
+    if (!tabs.length) tabs = await chrome.tabs.query({ url: PROVIDER_URLS });
+    const tab = tabs.find((t) => t.active) || tabs[0];
+    if (!tab) { await reply({ ok: false, error: "No AI chat tab is open." }); return; }
+    try {
+      // Callback form, never awaited: the content script answers LATER via an
+      // "a2a_result" runtime message, so the channel closing is expected — not a
+      // failure. Only "no receiver" is a real error, and it must not race the
+      // content script's own reply.
+      chrome.tabs.sendMessage(
+        tab.id,
+        { type: "zs-a2a-prompt", prompt: msg.prompt, promptId },
+        () => {
+          const err = chrome.runtime.lastError;
+          if (err && /Receiving end|Could not establish/i.test(err.message || "")) {
+            reply({ ok: false, error: "No Snapgent content script in the AI chat tab. Reload it." });
+          }
+        }
+      );
+    } catch (e) {
+      reply({ ok: false, error: "The AI chat tab did not accept the prompt." });
+    }
+  } catch (e) {
+    await reply({ ok: false, error: String((e && e.message) || e) });
   }
 }
 
@@ -343,6 +389,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       case "remove_server": {
         const r = await send({ type: "remove_server", server_id: msg.server_id }, 15000);
         sendResponse(r);
+        break;
+      }
+      case "a2a_result": {
+        await send({ type: "prompt_result", prompt_id: msg.promptId,
+                     ok: !!msg.ok, text: msg.text || "", error: msg.error || "" }, 15000);
+        sendResponse({ ok: true });
         break;
       }
       case "reconnect":
