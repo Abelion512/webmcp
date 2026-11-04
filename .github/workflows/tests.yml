@@ -1,0 +1,70 @@
+name: tests
+
+# Runs the repo's existing zero-dependency suites: Python unit tests plus
+# the Node stub-DOM smoke tests for the extension. Deliberately NOT
+# Playwright/Puppeteer: the extension tests stub the DOM in plain Node
+# (see snapgent-extension/test-chatgpt.js) and the repo ships no npm
+# dependencies for the extension, so a browser download would be the
+# heaviest part of the suite for the least coverage gain.
+#
+# Injection safety: no step interpolates untrusted event input into a
+# shell command. Every run: block is a fixed string, and checkout uses
+# the default ref, so a malicious PR title/body cannot inject commands
+# into this workflow.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: "**/requirements*.txt"
+      - name: Install test deps
+        run: python -m pip install pytest websockets pyflakes
+      - name: Python static check (unused imports/names)
+        run: python -m pyflakes workspace_mcp.py bridge.py test_*.py scripts/e2e_live.py setup-config.py
+      - name: Python tests
+        run: python -m pytest -q
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Extension stub-DOM tests
+        run: |
+          node --check snapgent-extension/background.js
+          node --check snapgent-extension/popup.js
+          node snapgent-extension/test-parser.js
+          node snapgent-extension/test-chatgpt.js
+          node snapgent-extension/test-meta.js
+          node snapgent-extension/test-popup-status.js
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: "**/requirements*.txt"
+      - name: Install e2e deps
+        run: python -m pip install websockets
+      - name: Live e2e (real bridge + subprocess, ephemeral port)
+        run: |
+          if [ -f scripts/e2e_live.py ]; then
+            python scripts/e2e_live.py
+          else
+            echo "scripts/e2e_live.py not present, skipping"
+          fi

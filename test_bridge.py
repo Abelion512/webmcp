@@ -1,4 +1,3 @@
-import asyncio
 import json
 import sys
 import tempfile
@@ -144,8 +143,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     await manager.stop_servers()
 
     def test_duplicate_tool_names_are_server_qualified(self):
-        first = bridge.MCPServer("roblox", {})
-        second = bridge.MCPServer("effectcraft", {})
+        first = bridge.MCPServer("alpha", {})
+        second = bridge.MCPServer("beta", {})
         first.process = SimpleNamespace(returncode=None)
         second.process = SimpleNamespace(returncode=None)
         first.ready = second.ready = True
@@ -153,15 +152,64 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         second.tools = [{"name": "get_state"}]
 
         manager = bridge.Bridge()
-        manager.servers = {"roblox": first, "effectcraft": second}
+        manager.servers = {"alpha": first, "beta": second}
         manager._rebuild_catalog()
 
         self.assertEqual(
             [tool["name"] for tool in manager._catalog],
-            ["roblox/get_state", "effectcraft/get_state"],
+            ["alpha/get_state", "beta/get_state"],
         )
-        self.assertIs(manager._resolve_tool("effectcraft/get_state")[0], second)
+        self.assertIs(manager._resolve_tool("beta/get_state")[0], second)
         self.assertIsNone(manager._resolve_tool("get_state")[0])
+
+    def test_restart_backoff_is_exponential_and_capped(self):
+        server = bridge.MCPServer("mock", {})
+        delays = [server.record_restart_failure() for _ in range(12)]
+        self.assertEqual(delays[:4], [5.0, 10.0, 20.0, 40.0])
+        self.assertTrue(all(d <= bridge.RESTART_MAX_DELAY_SECONDS for d in delays))
+        self.assertEqual(server.restart_attempts, 12)
+        self.assertGreater(server.next_restart_at, 0.0)
+        server.record_restart_success()
+        self.assertEqual(server.restart_attempts, 0)
+        self.assertEqual(server.next_restart_at, 0.0)
+
+    def test_get_bridge_status_shape(self):
+        manager = bridge.Bridge()
+        status = manager.get_bridge_status(log_tail=["line one", "line two"])
+        self.assertEqual(status["bridge_version"], bridge.BRIDGE_VERSION)
+        self.assertEqual(status["host"], bridge.HOST)
+        self.assertEqual(status["port"], bridge.PORT)
+        self.assertEqual(status["clients_connected"], 0)
+        self.assertEqual(status["servers"], [])
+        self.assertEqual(status["log_tail"], ["line one", "line two"])
+        self.assertGreaterEqual(status["uptime_seconds"], 0.0)
+
+    def test_json_log_formatter_emits_parseable_json(self):
+        import logging
+
+        formatter = bridge._JsonLogFormatter()
+        record = logging.LogRecord(
+            "test", logging.INFO, __file__, 1, "hello %s", ("world",), None
+        )
+        parsed = json.loads(formatter.format(record))
+        self.assertEqual(parsed["level"], "INFO")
+        self.assertEqual(parsed["message"], "hello world")
+        self.assertIn("ts", parsed)
+
+    @unittest.skipIf(bridge.websockets is None, "websockets package is not installed")
+    async def test_websocket_get_bridge_status_request(self):
+        manager = bridge.Bridge()
+        async with bridge.websockets.serve(manager.handle_client, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            async with bridge.websockets.connect(f"ws://127.0.0.1:{port}") as client:
+                connected = json.loads(await client.recv())
+                self.assertEqual(connected["type"], "connected")
+                await client.send(json.dumps({"id": 9, "type": "get_bridge_status"}))
+                reply = json.loads(await client.recv())
+                self.assertEqual(reply["type"], "bridge_status")
+                self.assertEqual(reply["id"], 9)
+                self.assertEqual(reply["status"]["clients_connected"], 1)
+                self.assertIn("log_tail", reply["status"])
 
 
 if __name__ == "__main__":
