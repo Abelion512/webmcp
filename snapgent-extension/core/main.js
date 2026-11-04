@@ -4464,12 +4464,39 @@
   //  WIRING
   // ════════════════════════════════════════════════════════════════════════
 
+  // A2A delegation: run one prompt to completion and report the final text
+  // back to the background worker. The background relays it to the bridge.
+  async function runA2APrompt(prompt, promptId) {
+    const reply = (payload) => {
+      try {
+        chrome.runtime.sendMessage({ type: "a2a_result", promptId, ...payload }).catch(() => {});
+      } catch {}
+    };
+    try {
+      if (A.running || A.starting || A.injecting) throw new Error("The web AI is already working on another task.");
+      if (!A.started) {
+        await startSession();
+        if (!A.started) throw new Error("Could not start a Snapgent session in this chat.");
+      }
+      const base = await submitAndGetBase(prompt);
+      await agentLoop(base);            // returns when no tool call is pending
+      const item = P.lastAssistant();
+      const text = item ? P.itemText(item) : "";
+      reply({ ok: true, text: text || "" });
+    } catch (e) {
+      reply({ ok: false, error: String((e && e.message) || e) });
+    }
+  }
+
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg && msg.type === "zs-status") {
       ui.setStatus({ connected: msg.connected, mcpAlive: msg.mcpAlive, studio: msg.studio, studioApp: msg.studioApp, studioProc: msg.studioProc, tools: msg.tools, servers: msg.servers });
     }
     if (msg && msg.type === "zs-open-menu") {
       ui.openMenu(false); // from the popup's Settings button — opens at the top (Switch AI)
+    }
+    if (msg && msg.type === "zs-a2a-prompt") {
+      runA2APrompt(msg.prompt, msg.promptId); // async; result goes via runtime message
     }
   });
 
