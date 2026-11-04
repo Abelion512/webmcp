@@ -28,6 +28,13 @@ documentation:
           - docs/**
           - LICENSE
 
+security:
+  # the handshake itself: origin allowlist, token check, token file, revocation
+  - changed-files:
+      - any-glob-to-any-file:
+          - bridge_auth.py
+          - bridge.py
+
 ci:
   - changed-files:
       - any-glob-to-any-file:
