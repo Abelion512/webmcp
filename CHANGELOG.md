@@ -2,6 +2,25 @@
 
 All notable changes to snapgentV3 Free are documented here.
 
+## [Unreleased]
+
+### Changed
+- **MCP server renamed:** `vscode_mcp.py` is now `workspace_mcp.py`, a generic
+  stdio MCP file server scoped to one directory.
+- **Explicit workspace root:** the server no longer auto-detects a VS Code
+  workspace. The root comes from `ZS_WORKSPACE_ROOT` (or `MCP_ROOT`); tools
+  fail with a clear error until it is set.
+- **setup-config.py is Linux-only:** it writes a single `repo` MCP server entry
+  carrying `ZS_WORKSPACE_ROOT`. Roblox Studio and EffectCraft detection are
+  gone.
+- **bridge.py:** Roblox Studio coupling removed (`studio_status`, process
+  probing, the `roblox`/`vscode` guards). The bridge is now server-agnostic.
+- **Deleted Windows/macOS artifacts:** `bridge.exe`, `vscode_mcp.exe`,
+  `vscode_mcp.spec`, `start.bat`, `setup-config.ps1`,
+  `start-effectcraft.ps1`, `MacOS_Start.command`.
+- **Added `sync-upstream.sh`:** merges upstream/main and re-purges the deleted
+  artifacts on every sync.
+
 ## [V3.9.4] - 2026-10-31
 
 ### Changed
