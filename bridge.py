@@ -2,7 +2,6 @@
 """Cross-platform local WebSocket bridge for Snapgent MCP servers."""
 
 import asyncio
-import hmac
 import json
 import logging
 import os
@@ -13,9 +12,27 @@ import socket
 import subprocess
 import sys
 import time
-import urllib.parse
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+# Handshake policy (Origin allowlist, per-install token, token file handling)
+# lives in bridge_auth.py; the names are re-exported here because bridge.py is the
+# entry point and the tests configure auth through this module.
+from bridge_auth import (
+    ALLOWED_ORIGIN_PREFIXES,
+    AUTH_DISABLE_ENV,
+    AUTH_DISABLED_VALUES,
+    TOKEN_ENV,
+    TOKEN_PATH_ENV,
+    auth_disabled,
+    header_value,
+    load_auth_token,
+    origin_allowed,
+    presented_token,
+    token_matches,
+    token_path,
+    write_token_file,
+)
 
 try:
     import websockets
@@ -36,24 +53,15 @@ MCP_PROTOCOL_VERSION = "2024-11-05"
 BRIDGE_VERSION = "3.9.4"
 MAX_LOG_CHARS = 1000
 
-# Handshake policy. Web browsers do not apply CORS to WebSockets, so without an
-# Origin allowlist any website could open ws://127.0.0.1:PORT and call every MCP
-# tool. Only browser-extension origins and non-browser clients (no Origin header
-# at all) are accepted.
-ALLOWED_ORIGIN_PREFIXES = (
-    "chrome-extension://",
-    "moz-extension://",
-    "safari-web-extension://",
-)
-# A per-install shared secret, sent by the extension as ?token=... on connect (or
-# by native clients as the X-Bridge-Token header). Auto-generated on first run.
-TOKEN_ENV = "ZS_BRIDGE_TOKEN"
-TOKEN_PATH_ENV = "ZS_BRIDGE_TOKEN_FILE"
-AUTH_DISABLE_ENV = "ZS_BRIDGE_AUTH"  # set to 0/off/false/no to run without a token
-AUTH_DISABLED_VALUES = {"0", "off", "false", "no"}
 # An unpaired extension retries every few seconds, so repeat rejections are only
 # reported once per interval to keep bridge_debug.log readable.
 REJECT_LOG_INTERVAL = 60.0
+# Rotation must end the sessions that were authenticated with the old token, so
+# every live client is closed once the new token has been sent. 1012 ("service
+# restart") is a reconnect signal, not a pairing problem, so the extension does
+# not flash its pairing card for it.
+ROTATE_CLOSE_CODE = 1012
+ROTATE_CLOSE_REASON = "bridge token rotated; reconnect with the new token"
 
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
@@ -71,121 +79,6 @@ def log(message: str) -> None:
 
 def _json_line(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-
-
-def token_path() -> Path:
-    override = (os.environ.get(TOKEN_PATH_ENV) or "").strip()
-    if override:
-        return Path(override).expanduser()
-    return Path.home() / ".snapgent" / "bridge_token"
-
-
-def auth_disabled() -> bool:
-    return (os.environ.get(AUTH_DISABLE_ENV) or "").strip().lower() in AUTH_DISABLED_VALUES
-
-
-def load_auth_token() -> Tuple[Optional[str], bool]:
-    """Return (token, created). A token of None means auth is turned off."""
-    if auth_disabled():
-        return None, False
-    env_token = (os.environ.get(TOKEN_ENV) or "").strip()
-    if env_token:
-        return env_token, False
-
-    path = token_path()
-    try:
-        existing = path.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
-        existing = ""
-    except OSError as error:
-        log(f"WARNING: could not read the bridge token ({error}); token auth is off.")
-        return None, False
-    if existing:
-        return existing, False
-
-    token = secrets.token_urlsafe(32)
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            path.parent.chmod(0o700)
-        except OSError:
-            pass
-        # O_EXCL keeps two bridges racing on first run from overwriting a token
-        # the other one already handed out.
-        handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            stream.write(token + "\n")
-    except FileExistsError:
-        try:
-            return path.read_text(encoding="utf-8").strip() or None, False
-        except OSError:
-            return None, False
-    except OSError as error:
-        log(f"WARNING: could not create the bridge token ({error}); token auth is off.")
-        return None, False
-    return token, True
-
-
-def _write_token_file(path: Path, token: str) -> None:
-    """Write the token atomically with mode 0600, replacing any previous value."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        path.parent.chmod(0o700)
-    except OSError:
-        pass
-    temp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
-    descriptor = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            stream.write(token + "\n")
-    except BaseException:
-        try:
-            temp.unlink()
-        except OSError:
-            pass
-        raise
-    os.replace(temp, path)
-
-
-def origin_allowed(origin: Optional[str]) -> bool:
-    if not origin:
-        return True  # native clients (tests, curl, desktop app) send no Origin
-    return origin.startswith(ALLOWED_ORIGIN_PREFIXES)
-
-
-def request_headers(websocket: Any) -> Any:
-    headers = getattr(getattr(websocket, "request", None), "headers", None)
-    if headers is not None:
-        return headers
-    return getattr(websocket, "request_headers", None)  # websockets < 14
-
-
-def request_path(websocket: Any) -> str:
-    path = getattr(getattr(websocket, "request", None), "path", None)
-    if isinstance(path, str):
-        return path
-    legacy = getattr(websocket, "path", None)  # websockets < 14
-    return legacy if isinstance(legacy, str) else ""
-
-
-def _header_value(websocket: Any, name: str) -> Optional[str]:
-    headers = request_headers(websocket)
-    if headers is None:
-        return None
-    try:
-        value = headers.get(name)
-    except AttributeError:
-        return None
-    return value if isinstance(value, str) else None
-
-
-def presented_token(websocket: Any) -> Optional[str]:
-    header_token = (_header_value(websocket, "X-Bridge-Token") or "").strip()
-    if header_token:
-        return header_token
-    query = urllib.parse.parse_qs(urllib.parse.urlparse(request_path(websocket)).query)
-    values = query.get("token") or []
-    return values[0].strip() if values else None
 
 
 class MCPServer:
@@ -531,6 +424,29 @@ class Bridge:
         except Exception:
             pass
 
+    async def revoke_clients(self) -> int:
+        """Close every authenticated connection so each one must re-handshake.
+
+        Used after a token rotation: a session that was authenticated with the
+        old secret must not stay open. 1012 ("service restart") tells the
+        extension this is a reconnect, not a pairing problem, so it keeps the
+        token it just saved and dials in again.
+        """
+        async with self._client_lock:
+            clients = list(self.clients)
+        if clients:
+            await asyncio.gather(
+                *(self._close_client(client) for client in clients),
+                return_exceptions=True,
+            )
+        return len(clients)
+
+    async def _close_client(self, client: Any) -> None:
+        try:
+            await client.close(code=ROTATE_CLOSE_CODE, reason=ROTATE_CLOSE_REASON)
+        except Exception:
+            pass
+
     def _log_rejection(self, key: str, message: str) -> None:
         """Log the first rejection, then at most one summary per interval."""
         now = time.monotonic()
@@ -544,10 +460,12 @@ class Bridge:
         self._reject_log[key] = (now, 0)
 
     def rotate_token(self, request_id: Any = None) -> Dict[str, Any]:
-        """Issue a fresh token that applies to future connections, no restart needed.
+        """Issue and persist a fresh token; the caller revokes the live sessions.
 
-        The caller is already authenticated by the current token, and existing
-        connections keep working; only new handshakes use the new value.
+        Rotation changes the value future handshakes must present. Once the reply
+        is on the wire, `_handle_request` closes every authenticated connection, so
+        no session outlives the old secret; the extension stores the new token and
+        reconnects with it by itself.
         """
         response: Dict[str, Any] = {"type": "token_rotated", "id": request_id}
         if self.token is None:
@@ -561,7 +479,7 @@ class Bridge:
         token = secrets.token_urlsafe(32)
         path = token_path()
         try:
-            _write_token_file(path, token)
+            write_token_file(path, token)
         except OSError as error:
             log(f"could not rotate the bridge token ({error})")
             return {**response, "ok": False, "error": f"could not write {path}: {error}"}
@@ -576,7 +494,7 @@ class Bridge:
             pass
 
     async def handle_client(self, websocket: Any, _path: Optional[str] = None) -> None:
-        origin = _header_value(websocket, "Origin")
+        origin = header_value(websocket, "Origin")
         if not origin_allowed(origin):
             self._log_rejection(
                 f"origin:{origin}", f"rejected client from origin {origin!r}"
@@ -585,7 +503,7 @@ class Bridge:
             return
         if self.token:
             presented = presented_token(websocket)
-            if not presented or not hmac.compare_digest(presented, self.token):
+            if not presented or not token_matches(presented, self.token):
                 self._log_rejection(
                     "token", "rejected client with a missing or invalid bridge token"
                 )
@@ -656,7 +574,13 @@ class Bridge:
             await self._send_client(websocket, response)
             await self.broadcast(self._connected_message())
         elif kind == "rotate_token":
-            await self._send_client(websocket, self.rotate_token(request_id))
+            response = self.rotate_token(request_id)
+            # Send the new token first: the client needs it before its socket goes
+            # away, and the extension saves it as soon as the reply arrives.
+            await self._send_client(websocket, response)
+            if response.get("ok"):
+                revoked = await self.revoke_clients()
+                log(f"revoked {revoked} authenticated connection(s) after the token rotation")
         elif kind == "add_server":
             await self._change_server(websocket, request, remove=False)
         elif kind == "remove_server":
@@ -887,7 +811,7 @@ async def run() -> None:
             "The 'websockets' package is required. Install it with "
             f"'{sys.executable} -m pip install websockets'."
         )
-    token, created = load_auth_token()
+    token, created = load_auth_token(log)
     bridge = Bridge(token)
     server = await websockets.serve(
         bridge.handle_client,

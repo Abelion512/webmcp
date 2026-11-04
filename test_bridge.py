@@ -216,6 +216,19 @@ class BridgeAuthTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, {bridge.AUTH_DISABLE_ENV: "0"}):
             self.assertEqual(bridge.load_auth_token(), (None, False))
 
+    def test_token_matches_is_constant_time_and_tolerates_any_input(self):
+        self.assertTrue(bridge.token_matches("secret", "secret"))
+        self.assertFalse(bridge.token_matches("secret", "secrets"))
+        self.assertFalse(bridge.token_matches("", "secret"))
+        self.assertFalse(bridge.token_matches(None, "secret"))
+        self.assertFalse(bridge.token_matches("secret", None))
+        # Non-ASCII must be a plain mismatch: hmac.compare_digest raises
+        # TypeError on non-ASCII str, which used to crash the connection handler.
+        self.assertFalse(bridge.token_matches("\u00e9", "secret"))
+        # Non-ASCII still compares correctly against itself; only the crash goes away.
+        self.assertTrue(bridge.token_matches("\u00e9", "\u00e9"))
+        self.assertFalse(bridge.token_matches("\ud800", "secret"))  # lone surrogate
+
     def test_rotate_token_refuses_when_pinned_or_disabled(self):
         with patch.dict(os.environ, {bridge.TOKEN_ENV: "pinned", bridge.AUTH_DISABLE_ENV: ""}):
             result = bridge.Bridge("pinned").rotate_token("r1")
@@ -255,6 +268,11 @@ class BridgeAuthTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(json.loads(await client.recv())["type"], "connected")
                         await client.send(json.dumps({"type": "rotate_token", "id": 7}))
                         reply = json.loads(await client.recv())
+                        # The reply arrives first, then the rotation revokes the
+                        # session that asked for it.
+                        with self.assertRaises(bridge.websockets.exceptions.ConnectionClosed) as closed:
+                            await client.recv()
+                        self.assertEqual(closed.exception.code, bridge.ROTATE_CLOSE_CODE)
                     self.assertTrue(reply["ok"], reply)
                     new_token = reply["token"]
                     self.assertEqual(path.read_text(encoding="utf-8").strip(), new_token)
@@ -265,6 +283,62 @@ class BridgeAuthTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(ctx.exception.code, 1008)
                     async with bridge.websockets.connect(f"{base}/?token={new_token}") as fresh:
                         self.assertEqual(json.loads(await fresh.recv())["type"], "connected")
+
+    @unittest.skipIf(bridge.websockets is None, "websockets package is not installed")
+    async def test_rotation_revokes_every_authenticated_connection(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "bridge_token"
+            with patch.dict(os.environ, {bridge.TOKEN_PATH_ENV: str(path)}, clear=False):
+                os.environ.pop(bridge.TOKEN_ENV, None)
+                os.environ.pop(bridge.AUTH_DISABLE_ENV, None)
+                manager = bridge.Bridge("old-token")
+                async with bridge.websockets.serve(manager.handle_client, "127.0.0.1", 0) as server:
+                    port = server.sockets[0].getsockname()[1]
+                    base = f"ws://127.0.0.1:{port}"
+                    async with bridge.websockets.connect(f"{base}/?token=old-token") as owner:
+                        async with bridge.websockets.connect(f"{base}/?token=old-token") as bystander:
+                            self.assertEqual(json.loads(await owner.recv())["type"], "connected")
+                            self.assertEqual(json.loads(await bystander.recv())["type"], "connected")
+                            await owner.send(json.dumps({"type": "rotate_token", "id": 1}))
+                            reply = json.loads(await owner.recv())
+                            self.assertTrue(reply["ok"], reply)
+                            # Both the caller and the idle session lose their socket:
+                            # a leaked token must not keep any connection alive.
+                            for client in (owner, bystander):
+                                with self.assertRaises(bridge.websockets.exceptions.ConnectionClosed) as closed:
+                                    await client.recv()
+                                self.assertEqual(closed.exception.code, bridge.ROTATE_CLOSE_CODE)
+
+                    new_token = reply["token"]
+                    async with bridge.websockets.connect(f"{base}/?token=old-token") as stale:
+                        with self.assertRaises(bridge.websockets.exceptions.ConnectionClosed) as closed:
+                            await stale.recv()
+                        self.assertEqual(closed.exception.code, 1008)
+                    async with bridge.websockets.connect(f"{base}/?token={new_token}") as fresh:
+                        self.assertEqual(json.loads(await fresh.recv())["type"], "connected")
+
+    @unittest.skipIf(bridge.websockets is None, "websockets package is not installed")
+    async def test_non_ascii_token_is_refused_with_1008(self):
+        manager = bridge.Bridge("secret-token")
+        async with bridge.websockets.serve(manager.handle_client, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            base = f"ws://127.0.0.1:{port}"
+
+            async def close_code(uri):
+                async with bridge.websockets.connect(uri) as client:
+                    try:
+                        await client.recv()
+                    except bridge.websockets.exceptions.ConnectionClosed as error:
+                        return error.code
+                return None
+
+            # hmac.compare_digest() raised TypeError on non-ASCII input, so this
+            # closed with 1011 and printed a traceback instead of rejecting.
+            self.assertEqual(await close_code(f"{base}/?token=%C3%A9"), 1008)
+            self.assertEqual(await close_code(base + "/?token=%FF%E0"), 1008)
+            # The handler survived, so a valid client still gets in.
+            async with bridge.websockets.connect(f"{base}/?token=secret-token") as client:
+                self.assertEqual(json.loads(await client.recv())["type"], "connected")
 
     @unittest.skipIf(bridge.websockets is None, "websockets package is not installed")
     async def test_handshake_requires_origin_and_token(self):

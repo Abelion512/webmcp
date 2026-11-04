@@ -7,6 +7,10 @@
 // Contract with content.js: every sendMessage ALWAYS gets a response object,
 // even when the bridge is offline. The agentic loop must never hang waiting.
 
+// Classic service worker (no "type": "module"), so shared code is pulled in with
+// importScripts. core/pairing.js builds the handshake URL and classifies closes.
+importScripts("core/pairing.js");
+
 const PORT = 17613;
 const URL = `ws://127.0.0.1:${PORT}`;
 // Pairing secret issued by the bridge (~/.snapgent/bridge_token). The popup saves
@@ -85,7 +89,7 @@ async function connect() {
   clearTimeout(reconnectTimer);
   try {
     if (bridgeToken === null) bridgeToken = await readBridgeToken();
-    const url = bridgeToken ? `${URL}/?token=${encodeURIComponent(bridgeToken)}` : URL;
+    const url = ZSPairing.bridgeUrl(URL, bridgeToken);
     ws = new WebSocket(url);
   } catch (e) {
     log("WebSocket ctor failed", e);
@@ -118,8 +122,7 @@ async function connect() {
 
   ws.onclose = (ev) => {
     connected = false;
-    // 1008 = policy violation: the bridge wants a token we do not have yet.
-    authRequired = !!ev && ev.code === 1008;
+    authRequired = ZSPairing.isAuthClose(ev);
     mcpAlive = false;
     studioConnected = null;
     studioApp = null;
@@ -356,8 +359,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         break;
       }
       case "rotate_token": {
-        // The bridge is already authenticated by the current token and applies the
-        // new one to future handshakes, so no restart or reconnect is needed.
+        // The bridge replies with the new token and then closes every authenticated
+        // socket (1012), so it must be saved here before onclose fires: the
+        // reconnect then dials in with the new value instead of asking to pair.
         const r = await send({ type: "rotate_token" }, 15000);
         if (r.ok && r.token) {
           bridgeToken = r.token;

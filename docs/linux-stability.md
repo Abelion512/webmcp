@@ -31,10 +31,13 @@ violation)**, so the extension can tell them apart from "bridge not running".
   and reconnects.
 - **Forgetting / rotating**: `🗝 Forget saved token` in the popup clears the stored
   copy and prompts again. `🔑 Rotate token` (shown while connected) asks the bridge to
-  generate a new secret, writes it to the token file and applies it to the next
-  handshake; existing connections keep working, so no restart or reconnect is needed.
-  Rotation is refused while `ZS_BRIDGE_TOKEN` pins the value. To rotate by hand,
-  delete `~/.snapgent/bridge_token` and restart the bridge, then pair again.
+  generate a new secret and write it to the token file. The bridge replies with the
+  new token first, then **closes every authenticated connection** (close code `1012`,
+  "service restart") so no session keeps running on the old secret. The extension
+  saves the token before the socket drops and reconnects with it, so the popup only
+  blinks for about a second; a raw client must reconnect with the token it received
+  in the reply. Rotation is refused while `ZS_BRIDGE_TOKEN` pins the value. To rotate
+  by hand, delete `~/.snapgent/bridge_token` and restart the bridge, then pair again.
 - **Check without starting**: `bash Linux_Start.sh --check` prints the Python and
   `websockets` versions, the auth mode, the token path and the endpoint, then exits
   without installing anything or starting the bridge.

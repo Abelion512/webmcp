@@ -11,7 +11,7 @@
 [![License](https://img.shields.io/badge/LICENSE-GPL--3.0-FACC15?style=flat-square&labelColor=111111&logo=opensourceinitiative&logoColor=FACC15)](LICENSE)
 [![Manifest](https://img.shields.io/badge/MANIFEST-V3-FACC15?style=flat-square&labelColor=111111&logo=googlechrome&logoColor=FACC15)](https://developer.chrome.com/docs/extensions/develop/migrate/what-is-mv3/)
 [![Release](https://img.shields.io/badge/RELEASE-V3.9.4-FACC15?style=flat-square&labelColor=111111&logo=semanticrelease&logoColor=FACC15)](https://github.com/herdodp/snapgent-connector/releases/tag/V3.9.4)
-[![CI](https://img.shields.io/github/actions/workflow/status/Abelion512/webmcp/ci.yml?branch=main&label=CI&style=flat-square&labelColor=111111&logo=githubactions&logoColor=FACC15)](https://github.com/Abelion512/webmcp/actions/workflows/ci.yml)
+[![CI](https://img.shields.io/github/actions/workflow/status/Abelion512/webmcp/ci.yml?branch=linux-stability&label=CI&style=flat-square&labelColor=111111&logo=githubactions&logoColor=FACC15)](https://github.com/Abelion512/webmcp/actions/workflows/ci.yml)
 [![MCP](https://img.shields.io/badge/PROTOCOL-MCP-FACC15?style=flat-square&labelColor=111111&logo=modelcontextprotocol&logoColor=FACC15)](https://modelcontextprotocol.io/)
 
 </div>
@@ -190,9 +190,11 @@ token, so a regular web page cannot drive your workspace through port 17613.
 3. Paste the token, press **Save**, and the popup reconnects as `Connected`.
 
 The extension keeps the token in `chrome.storage.local`. **🔑 Rotate token** (visible
-while connected) asks the bridge for a new secret, saves it on both sides and applies
-it to the next handshake — no restart needed. **🗝 Forget saved token** clears the
-stored copy and shows the pairing field again.
+while connected) asks the bridge for a new secret and saves it on both sides; the
+bridge then closes every authenticated connection, so a leaked token cannot keep a
+live session. The extension reconnects with the new value by itself — no restart
+needed. **🗝 Forget saved token** clears the stored copy and shows the pairing field
+again.
 
 Advanced: `ZS_BRIDGE_TOKEN_FILE` moves the token file, `ZS_BRIDGE_TOKEN` pins an exact
 value (rotation is then refused), and `ZS_BRIDGE_AUTH=0` disables token auth — only
