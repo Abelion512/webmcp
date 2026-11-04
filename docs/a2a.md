@@ -32,22 +32,23 @@ bash Linux_Start.sh
 ```
 
 `Linux_Start.sh` runs `python3 bridge.py` in the foreground. At startup the
-bridge prints the A2A endpoint and the bearer token to the terminal (and to
-`logs/bridge_debug.log`):
+bridge prints the A2A endpoint and the bearer token to the terminal:
 
 ```
 A2A agent card: http://127.0.0.1:17614/.well-known/agent-card.json
 A2A bearer token: <token>
 ```
 
+The token is printed to the terminal only, never to `logs/bridge_debug.log`.
 Keep the terminal open while you use the agent.
 
 ## Authenticate
 
-Every `POST /` needs the bearer token. Copy the token the bridge printed:
+Every `POST /` needs the bearer token. Copy the token the bridge printed to the
+terminal:
 
 ```
-export ZS_A2A_TOKEN=<token from the bridge log>
+export ZS_A2A_TOKEN=<token from the bridge terminal>
 ```
 
 The Agent Card is public and needs no token:
@@ -254,6 +255,10 @@ ZS_A2A_PORT=19000 ZS_A2A_TOKEN=my-token bash Linux_Start.sh
 - No push notifications (`pushNotifications: false` in the card).
 - No task cancel. The extension cannot interrupt a generation cleanly, so
   `tasks/cancel` is not implemented.
+- The extension websocket on `ws://127.0.0.1:17613` is not authenticated. The
+  bridge sends a prompt to a single socket and accepts its reply only from that
+  socket, but a local process that connects can still interfere. See the Risks
+  section of `docs/a2a-design.md`.
 
 ## Testing
 

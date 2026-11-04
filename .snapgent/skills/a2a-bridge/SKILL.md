@@ -36,7 +36,7 @@ Keep the terminal open. `ZS_A2A_DISABLE=1` skips the A2A server.
 ## Authenticate
 
 ```
-export ZS_A2A_TOKEN=<token from the bridge log>
+export ZS_A2A_TOKEN=<token from the bridge terminal>
 ```
 
 Every `POST /` needs `Authorization: Bearer $ZS_A2A_TOKEN`. The Agent Card is

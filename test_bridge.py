@@ -178,7 +178,7 @@ class PromptDelegationTests(unittest.IsolatedAsyncioTestCase):
             if client.sent:
                 return
             await asyncio.sleep(0.01)
-        self.fail("the bridge never broadcast the prompt")
+        self.fail("the bridge never sent the prompt")
 
     async def test_submit_prompt_resolves_on_prompt_result(self):
         manager = bridge.Bridge()
