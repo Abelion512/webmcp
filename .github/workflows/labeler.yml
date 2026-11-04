@@ -1,20 +1,30 @@
 name: Label pull requests
 
-# pull_request (not pull_request_target) because pull_request_target only ever
-# runs the workflow from the default branch, and this repository does its work on
-# linux-stability. Fork PRs are skipped: their GITHUB_TOKEN is read-only, so the
-# labeling step would fail instead of quietly doing nothing.
+# pull_request (not pull_request_target) so the workflow runs from the merge ref:
+# pull_request_target only ever uses the default branch, and this repository does
+# its work on linux-stability. Fork PRs are skipped because their GITHUB_TOKEN is
+# read-only, so labeling would fail instead of quietly doing nothing.
+#
+# workflow_dispatch labels an existing PR on demand (usually the first PR opened
+# after this file landed).
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr-number:
+        description: Pull request number to label
+        required: true
 
 jobs:
   label:
     name: Apply path labels
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write
     steps:
       - uses: actions/labeler@v7
+        with:
+          pr-number: ${{ inputs.pr-number || github.event.pull_request.number }}
