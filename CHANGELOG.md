@@ -4,6 +4,32 @@ All notable changes to snapgentV3 Free are documented here.
 
 ## [Unreleased]
 
+### Added
+- **Symlink traversal guard (`workspace_mcp.py`).** Traversal helpers
+  resolve every entry and skip anything whose target escapes the
+  workspace root, so a symlinked file can no longer leak external
+  content through `search_files`/`find_files`/`list_tree`/`list_dir`.
+  Internal symlinks (resolving inside the root) still work.
+- **`run_command` bounds.** Optional `timeout` (5–300 s, default 30),
+  an exact-basename deny list for privilege-escalation and raw-disk
+  binaries (`sudo`, `dd`, `mkfs*`, …), and shell-metacharacter
+  rejection on the Windows branch. The tool catalog stays at 28 tools.
+- **Bridge auto-recovery backoff.** The dead-server monitor now retries
+  with exponential backoff (5 s → 300 s cap) instead of a fixed 5 s, and
+  a tool call against a dead server gets one inline restart before it
+  fails as `unknown_tool`.
+- **`get_bridge_status` bridge request.** Returns bridge version,
+  uptime, connected clients, and per-server pid / alive / tools /
+  error / restart attempts / RSS, plus the last 30 log lines.
+- **Structured JSON bridge logging (opt-in).** `ZS_BRIDGE_LOG_JSON=1`
+  switches `logs/bridge_debug.log` to one JSON object per line; the
+  default text format is unchanged.
+- **Live e2e script (`scripts/e2e_live.py`)** and GitHub Actions
+  (`tests.yml`: Python + Node stub-DOM suites, plus e2e job) with
+  matching path labels in `labeler.yml`.
+- **`docs/security-and-ops.md`:** containment model, `run_command`
+  policy, bridge recovery, and how to diagnose a running bridge.
+
 ### Changed
 - **MCP server renamed:** `vscode_mcp.py` is now `workspace_mcp.py`, a generic
   stdio MCP file server scoped to one directory.

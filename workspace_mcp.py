@@ -22,6 +22,19 @@ IGNORED_DIRECTORIES = {
 MAX_RESULTS = 500
 MAX_FILE_CHARS = 200_000
 SAFE_PROJECT_SCRIPTS = {"build", "check", "format", "lint", "test", "typecheck"}
+# Defense-in-depth, NOT a security boundary: this tool is RCE by design (it
+# already runs arbitrary workspace commands), so a denylist can be bypassed
+# via another interpreter (python -c, node -e, ...). It only stops the most
+# common footguns from a confused agent: privilege escalation and raw-disk
+# destruction. Deny is checked before any execution (approval-gate rule 1).
+BLOCKED_COMMANDS = {
+    "sudo", "su", "doas", "pkexec",
+    "dd", "mkfs", "mkfs.ext4", "mkfs.xfs", "mkfs.btrfs", "mkfs.vfat",
+    "fdisk", "parted", "shutdown", "reboot", "halt", "poweroff", "init",
+}
+MAX_COMMAND_TIMEOUT = 300
+MIN_COMMAND_TIMEOUT = 5
+DEFAULT_COMMAND_TIMEOUT = 30
 
 
 def get_root() -> Path:
@@ -53,17 +66,49 @@ def _relative(path: Path, root: Path) -> str:
     return path.relative_to(root).as_posix() or "."
 
 
-def _iter_files(base: Path) -> Iterable[Path]:
+def _inside_root(path: Path, root: Path) -> bool:
+    """True iff the fully resolved path lives under the workspace root.
+
+    Lexical containment is not enough: a symlink inside the workspace can
+    point anywhere on disk, so every traversal must resolve before trusting
+    the entry (symlink-traversal guard; hardening-patterns: destructive
+    operations on derived paths).
+    """
+    try:
+        path.resolve().relative_to(root)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _prune_dirs(dirs: List[str], current: Path, root: Path) -> List[str]:
+    kept = []
+    for name in dirs:
+        if name in IGNORED_DIRECTORIES:
+            continue
+        candidate = current / name
+        # Never descend into (or list) a symlinked dir that escapes the root.
+        if candidate.is_symlink() and not _inside_root(candidate, root):
+            continue
+        kept.append(name)
+    return sorted(kept)
+
+
+def _iter_files(base: Path, root: Path) -> Iterable[Path]:
     if base.is_file():
-        yield base
+        if _inside_root(base, root):
+            yield base
         return
-    for current, dirs, names in os.walk(base):
-        dirs[:] = sorted(
-            name for name in dirs
-            if name not in IGNORED_DIRECTORIES
-        )
+    for current, dirs, names in os.walk(base, followlinks=False):
+        dirs[:] = _prune_dirs(dirs, Path(current), root)
         for name in sorted(names):
-            yield Path(current) / name
+            candidate = Path(current) / name
+            # Skip files whose resolved target escapes the workspace
+            # (e.g. a symlink to /etc/passwd or ~/.ssh). os.walk does not
+            # follow symlinked dirs, but symlinked FILES are still yielded
+            # and read_text() would follow them out of the root.
+            if _inside_root(candidate, root):
+                yield candidate
 
 
 def _run_process(command: List[str], root: Path, timeout: int = 30) -> str:
@@ -101,6 +146,8 @@ def get_project_info() -> Dict[str, Any]:
     for filename in ("package.json", "pyproject.toml", "Cargo.toml", "go.mod", "pom.xml", "*.sln"):
         candidates = sorted(root.glob(filename))[:10]
         for candidate in candidates:
+            if not _inside_root(candidate, root):
+                continue
             entry: Dict[str, Any] = {"path": _relative(candidate, root)}
             if candidate.name == "package.json":
                 try:
@@ -128,6 +175,7 @@ def list_dir(path: str = ".") -> List[Dict[str, str]]:
             "type": "directory" if child.is_dir() else "file",
         }
         for child in sorted(target.iterdir(), key=lambda item: (item.is_file(), item.name.lower()))
+        if _inside_root(child, root)
     ]
 
 
@@ -138,15 +186,14 @@ def list_tree(path: str = ".", max_depth: int = 3) -> List[Dict[str, Any]]:
         raise NotADirectoryError(f"Not a directory: {path}")
     depth_limit = max(0, min(int(max_depth), 8))
     result: List[Dict[str, Any]] = []
-    for current, dirs, files in os.walk(target):
+    for current, dirs, files in os.walk(target, followlinks=False):
         current_path = Path(current)
         depth = len(current_path.relative_to(target).parts)
-        dirs[:] = sorted(
-            name for name in dirs
-            if name not in IGNORED_DIRECTORIES
-        )
+        dirs[:] = _prune_dirs(dirs, current_path, root)
         for name in sorted(dirs) + sorted(files):
             entry_path = current_path / name
+            if not _inside_root(entry_path, root):
+                continue
             result.append({
                 "path": _relative(entry_path, root),
                 "type": "directory" if entry_path.is_dir() else "file",
@@ -167,7 +214,7 @@ def find_files(path: str = ".", pattern: str = "*") -> List[str]:
         raise NotADirectoryError(f"Not a directory: {path}")
     matches = [
         _relative(file_path, root)
-        for file_path in _iter_files(base)
+        for file_path in _iter_files(base, root)
         if fnmatch.fnmatch(file_path.name, pattern)
         or fnmatch.fnmatch(_relative(file_path, base), pattern)
     ]
@@ -183,7 +230,7 @@ def search_files(path: str, query: str, file_pattern: str = "*", case_sensitive:
         raise ValueError("Search query cannot be empty.")
     needle = query if case_sensitive else query.lower()
     matches: List[Dict[str, Any]] = []
-    files = [target] if target.is_file() else _iter_files(target)
+    files = [target] if target.is_file() else _iter_files(target, root)
     for file_path in files:
         if not fnmatch.fnmatch(file_path.name, file_pattern):
             continue
@@ -416,14 +463,42 @@ def git_commit(message: str) -> str:
     return _run_process(["git", "commit", "-m", message.strip()], get_root(), timeout=120)
 
 
-def run_command(command: str, args: Optional[List[str]] = None) -> str:
+def run_command(
+    command: str,
+    args: Optional[List[str]] = None,
+    timeout: Optional[int] = None,
+) -> str:
     if not command.strip():
         raise ValueError("Command cannot be empty.")
     root = get_root()
     extra_args = args or []
+    if not all(isinstance(arg, str) for arg in extra_args):
+        raise ValueError("args must be an array of strings.")
+    binary = Path(command.strip()).name
+    # Exact-binary deny (never prefix): "sudo" is blocked, "sudoku" is not an
+    # issue because only the basename is compared, and a path like
+    # "/usr/bin/sudo" still resolves to the blocked basename.
+    if binary in BLOCKED_COMMANDS:
+        raise ValueError(f"Command is blocked by policy: {binary}")
+    requested = timeout if timeout is not None else DEFAULT_COMMAND_TIMEOUT
+    try:
+        timeout_seconds = int(requested)
+    except (TypeError, ValueError):
+        raise ValueError("timeout must be an integer number of seconds.")
+    if timeout_seconds < MIN_COMMAND_TIMEOUT or timeout_seconds > MAX_COMMAND_TIMEOUT:
+        raise ValueError(
+            f"timeout must be between {MIN_COMMAND_TIMEOUT} and {MAX_COMMAND_TIMEOUT} seconds."
+        )
     if os.name == "nt":
-        return _run_process(["cmd.exe", "/c", command, *extra_args], root, timeout=30)
-    return _run_process([command, *extra_args], root, timeout=30)
+        # cmd.exe /c reintroduces a shell: metacharacters in the command string
+        # would chain extra commands, so reject them on this branch. On POSIX
+        # shell=False keeps every arg a single argv entry.
+        if any(ch in command for ch in "&|;<>`\n\r") or any(
+            ch in arg for ch in "&|;<>`\n\r" for arg in extra_args
+        ):
+            raise ValueError("Shell metacharacters are not allowed in command or args.")
+        return _run_process(["cmd.exe", "/c", command, *extra_args], root, timeout=timeout_seconds)
+    return _run_process([command, *extra_args], root, timeout=timeout_seconds)
 
 
 def _package_script_command(script: str, root: Path) -> List[str]:
@@ -505,7 +580,7 @@ TOOLS = [
     _tool("git_diff", "Show unstaged Git changes, optionally for one workspace path.", {"path": STR}),
     _tool("git_log", "Show recent Git commits.", {"limit": {"type": "integer", "minimum": 1, "maximum": 50}}),
     _tool("git_branches", "List local Git branches.", {}),
-    _tool("run_command", "Run a command with the workspace as its working directory.", {"command": STR, "args": {"type": "array", "items": STR}}, ["command"]),
+    _tool("run_command", "Run a command with the workspace as its working directory. Privilege-escalation and raw-disk binaries (sudo, dd, mkfs, ...) are blocked; timeout is capped at 300s.", {"command": STR, "args": {"type": "array", "items": STR}, "timeout": {"type": "integer", "minimum": 5, "maximum": 300}}, ["command"]),
     _tool("run_project_script", "Run a named safe script (build, check, format, lint, test, typecheck) from package.json.", {"script": STR}, ["script"]),
     _tool("run_tests", "Run the workspace test script, pytest, or .NET tests when configured.", {}),
     _tool("delete_file", "Delete one file inside the workspace; directories, the workspace root, and .git are refused.", {"path": STR}, ["path"]),
@@ -538,7 +613,7 @@ def tool_dispatch(name: str, args: Dict[str, Any]) -> Any:
         "git_diff": lambda: git_diff(args.get("path", "")),
         "git_log": lambda: git_log(args.get("limit", 10)),
         "git_branches": lambda: git_branches(),
-        "run_command": lambda: run_command(args["command"], args.get("args", [])),
+        "run_command": lambda: run_command(args["command"], args.get("args", []), args.get("timeout")),
         "run_project_script": lambda: run_project_script(args["script"]),
         "run_tests": lambda: run_tests(),
         "delete_file": lambda: delete_file(args["path"]),
