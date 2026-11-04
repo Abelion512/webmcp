@@ -291,6 +291,14 @@ function handleBridgeMessage(msg) {
     broadcastStatus();
     return;
   }
+  if (msg.type === "token_rotated") {
+    // The bridge answers with the new secret and only then drops the socket
+    // (1012). Resolving here - before onclose can fail every pending request -
+    // is what lets the worker store the token and reconnect with it instead of
+    // retrying the old one into a 1008.
+    resolvePending(msg.id, { ok: !!msg.ok, token: msg.token, error: msg.error });
+    return;
+  }
   if (msg.type === "server_changed") {
     // The bridge acks, then restarts itself to reload config.json. The socket
     // will drop right after this - the content script shows a spinner until the

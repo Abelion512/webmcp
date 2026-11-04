@@ -34,11 +34,11 @@ violation)**, so the extension can tell them apart from "bridge not running".
   generate a new secret and write it to the token file. The bridge replies with the
   new token first, then **closes every authenticated connection** (close code `1012`,
   "service restart") so no session keeps running on the old secret. The extension
-  saves the token before the socket drops and reconnects with it; while it dials back
-  in the popup reads `Token rotated · reconnecting` rather than `Bridge offline`,
-  because a `1012` close is not a pairing failure. It returns to `Connected` within
-  a second or two. A raw client must reconnect with the token it received in the
-  reply. Rotation is refused while `ZS_BRIDGE_TOKEN` pins the value. To rotate
+  resolves the `token_rotated` reply (the bridge sends it before the close) and
+  reconnects with that token; while it dials back in the popup reads
+  `Token rotated · reconnecting` rather than `Bridge offline`, because a `1012`
+  close is not a pairing failure. It returns to `Connected` within a second or two.
+  A raw client must reconnect with the token it received in the reply. Rotation is refused while `ZS_BRIDGE_TOKEN` pins the value. To rotate
   by hand, delete `~/.snapgent/bridge_token` and restart the bridge, then pair again.
 - **Check without starting**: `bash Linux_Start.sh --check` prints the Python and
   `websockets` versions, the auth mode, the token path and the endpoint, then exits
@@ -70,4 +70,7 @@ token required`) means the bridge is not running: start it with
 2. Before changing: `git fetch upstream && git merge upstream/main`
 3. Run `python3 -m unittest`
 4. Run `bash Linux_Start.sh` smoke test.
-5. Commit only after both pass.
+5. After touching the handshake, run `python3 smoke_extension_live.py`: it loads the
+   extension in headless Chrome against a throwaway bridge and checks pairing, the
+   `1008` refusal, rotation (`1012`) and the reconnect. Needs Chrome and port 17613.
+6. Commit only after both pass.
