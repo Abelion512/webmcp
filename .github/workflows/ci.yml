@@ -33,10 +33,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - name: Check service worker and popup syntax
+      # core/*.js are loaded into pages and the worker, so a syntax error there
+      # breaks the extension without failing any of the smoke tests.
+      - name: Check extension syntax
         run: |
-          node --check background.js
-          node --check popup.js
+          set -euo pipefail
+          for file in background.js popup.js core/*.js; do
+            node --check "$file"
+          done
       - name: Run smoke tests
         run: |
           set -euo pipefail
