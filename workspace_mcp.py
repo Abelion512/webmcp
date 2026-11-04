@@ -612,6 +612,11 @@ if __name__ == "__main__":
         try:
             request = json.loads(stripped)
         except json.JSONDecodeError:
+            send_message({
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32700, "message": "Parse error."},
+            })
             continue
         if isinstance(request, dict):
             handle_request(request)

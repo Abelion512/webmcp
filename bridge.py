@@ -385,8 +385,8 @@ class Bridge:
     async def _send_client(self, client: Any, message: Dict[str, Any]) -> None:
         try:
             await client.send(_json_line(message))
-        except Exception:
-            pass
+        except Exception as error:
+            log(f"bridge: failed to send to client: {error}")
 
     async def handle_client(self, websocket: Any, _path: Optional[str] = None) -> None:
         async with self._client_lock:
@@ -601,7 +601,7 @@ class Bridge:
             await self.start_servers()
             await self._send_client(
                 websocket,
-                {"type": "server_changed", "id": request_id, "ok": True, "restarting": False},
+                {"type": "server_changed", "id": request_id, "ok": True, "restarting": True},
             )
             await self.broadcast(self._connected_message())
         except (OSError, json.JSONDecodeError, RuntimeError) as error:
