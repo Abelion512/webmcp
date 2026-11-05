@@ -11,7 +11,7 @@
 [![License](https://img.shields.io/badge/LICENSE-GPL--3.0-FACC15?style=flat-square&labelColor=111111&logo=opensourceinitiative&logoColor=FACC15)](LICENSE)
 [![Manifest](https://img.shields.io/badge/MANIFEST-V3-FACC15?style=flat-square&labelColor=111111&logo=googlechrome&logoColor=FACC15)](https://developer.chrome.com/docs/extensions/develop/migrate/what-is-mv3/)
 [![Release](https://img.shields.io/badge/RELEASE-V3.9.4-FACC15?style=flat-square&labelColor=111111&logo=semanticrelease&logoColor=FACC15)](https://github.com/herdodp/snapgent-connector/releases/tag/V3.9.4)
-[![CI](https://img.shields.io/github/actions/workflow/status/Abelion512/webmcp/ci.yml?branch=linux-stability&label=CI&style=flat-square&labelColor=111111&logo=githubactions&logoColor=FACC15)](https://github.com/Abelion512/webmcp/actions/workflows/ci.yml)
+[![CI](https://img.shields.io/github/actions/workflow/status/Abelion512/webmcp/tests.yml?branch=linux-stability&label=CI&style=flat-square&labelColor=111111&logo=githubactions&logoColor=FACC15)](https://github.com/Abelion512/webmcp/actions/workflows/tests.yml)
 [![MCP](https://img.shields.io/badge/PROTOCOL-MCP-FACC15?style=flat-square&labelColor=111111&logo=modelcontextprotocol&logoColor=FACC15)](https://modelcontextprotocol.io/)
 
 </div>
@@ -29,9 +29,9 @@
   > no API key · no terminal · no copy-paste
 ```
 
-snapgentV3 is a browser extension plus a local bridge that connects a normal AI chat to **VS Code**. It automatically uses the currently open workspace. Describe what you want in plain language — the extension forwards commands to the selected server through the local bridge, and returns the results to chat.
+snapgentV3 is a browser extension plus a local bridge that connects a normal AI chat to a **workspace MCP server**. It runs commands in a scoped folder you configure. Describe what you want in plain language — the extension forwards commands to the selected server through the local bridge, and returns the results to chat.
 
-**Free and open source — no API key, subscription, or sign-in required.** snapgentV3 automatically uses the currently open VS Code workspace.
+**Free and open source — no API key, subscription, or sign-in required.** The workspace root is set with `ZS_WORKSPACE_ROOT`.
 
 ---
 
@@ -46,8 +46,8 @@ snapgentV3 is a browser extension plus a local bridge that connects a normal AI 
 <tr>
 <td width="100%" valign="top">
 
-### 💻 VS Code
-The default target. Automatically connects to the workspace currently open in VS Code.
+### 💻 Workspace MCP server
+The default target. Connects to the workspace folder you configure with `ZS_WORKSPACE_ROOT` (Linux only). See `docs/linux-mcp-design.md`.
 
 </td>
 </tr>
@@ -70,7 +70,7 @@ The default target. Automatically connects to the workspace currently open in VS
 4. The **bridge** routes it to the VS Code MCP server.
 5. The **result** is sent back into chat, and the AI continues working.
 
-VS Code's MCP server is configured locally by `start.bat`; it detects the open VS Code workspace automatically.
+The workspace MCP server is configured locally by `setup-config.py`; it runs in the folder you set with `ZS_WORKSPACE_ROOT`.
 
 ---
 
@@ -135,9 +135,8 @@ npm run dist     # build the Windows installer into dist/
 ## `03` &nbsp; Requirements
 
 - **Microsoft Edge** or **Google Chrome** (Manifest V3).
-- **VS Code** for the default target. Keep the workspace you want to use open in VS Code.
-- **Windows**, **macOS**, or **Linux** for the bridge.
-- **Python 3.9+** on macOS and Linux. Windows includes the bridge executable.
+- **Linux** for the workspace MCP server target.
+- **Python 3.9+** on Linux.
 - The bridge running while you use the agent.
 
 ---
@@ -154,29 +153,18 @@ npm run dist     # build the Windows installer into dist/
 
 **② Set up the MCP target**
 
-For VS Code, open the project folder you want to work on before clicking **Start** in the chat bar. The bridge can be started before VS Code; the agent waits until a workspace is available and does not fall back to the Snapgent release folder.
+Run `bash Linux_Start.sh` (or `python3 setup-config.py` with `ZS_WORKSPACE_ROOT` set). It writes the `repo` server entry to the ignored local `config.json`.
 
 **③ Start the bridge**
 
-- **Windows** — double-click `start.bat`. It configures VS Code MCP automatically.
-  You can start the bridge before VS Code.
-  Machine-specific settings are written to the ignored local `config.json`.
-- **macOS** — double-click `MacOS_Start.command`. It detects the bundled
-  VS Code MCP server, Roblox Studio's MCP executable, and an installed
-  EffectCraft CLI, then writes their machine-specific paths to the ignored
-  local `config.json`. This launcher uses `bridge.py`; it does not run the
-  Windows-only `bridge.exe`.
 - **Linux** — open a terminal in the extracted release folder and run
-  `bash Linux_Start.sh`. It detects the bundled VS Code MCP server and
-  installed EffectCraft CLI, then writes
-  machine-specific paths to the ignored local `config.json`. It uses
+  `bash Linux_Start.sh`. It writes the `repo` MCP server entry pointing at your
+  workspace root to the ignored local `config.json`. It uses
   `bridge.py`; the first launch installs the pinned dependency from
   `requirements.txt` for your user, or creates a local Python environment if your
   distribution blocks user installs.
 
-Keep the terminal window open while the bridge runs. On macOS, the first
-launch may show a Gatekeeper warning; select **Done**, then allow the script
-under **System Settings → Privacy & Security**.
+Keep the terminal window open while the bridge runs.
 
 **Pairing the extension (bridge token)**
 
@@ -212,32 +200,10 @@ since you copied it: paste the current value from `~/.snapgent/bridge_token`. A 
 policy-violation close in the bridge window means the same thing — see
 [`docs/linux-stability.md`](docs/linux-stability.md).
 
-**Optional: connect EffectCraft**
-
-On Windows, `start.bat` detects EffectCraft in common install locations and
-starts its control channel automatically. On macOS, install the separate
-EffectCraft CLI release and put `effectcraft-cli` on your `PATH`; the launcher
-detects it and starts the app's control channel when EffectCraft is installed
-in `/Applications` or `~/Applications`. On Linux, install the EffectCraft CLI
-and put `effectcraft-cli` on your `PATH`; the launcher detects it and starts
-EffectCraft when its executable is available on `PATH` or in a common
-installation location. On any system, save your work and close EffectCraft
-before restarting the launcher if EffectCraft is already open without the
-control channel. When the bridge connects, choose
-**EffectCraft** in the MCP target selector on the chat bar.
-
-On macOS, Roblox Studio MCP is detected at
-`/Applications/RobloxStudio.app/Contents/MacOS/StudioMCP`; set
-`ZS_STUDIO_MCP_PATH` before launching if it is installed elsewhere.
-Linux does not auto-detect Roblox Studio MCP. If you have a compatible Linux
-MCP executable, set `ZS_STUDIO_MCP_PATH` to its path before running the
-launcher; Roblox Studio itself may not be available on your Linux distribution.
-
 **④ Start a session**
 
 1. Open a supported AI chat site and start a new chat.
-2. Open a project folder in VS Code before clicking **Start**.
-3. Click **Start** and describe what you want to make.
+2. Click **Start** and describe what you want to make.
 
 **⑤ Updating to a new release**
 
@@ -250,8 +216,6 @@ The extension and the bridge are two separate parts, and each one has to be upda
 5. Check the versions: click the snapgentV3 icon. The popup header shows `ext vX · bridge vY`, and both numbers should match the release you installed. The bridge also writes `snapgent bridge vY` to its startup log.
 
 If the popup shows `bridge old`, the bridge is still running old code: repeat steps 2 and 3. On macOS and Linux, also make sure there is no old executable file named `bridge` in the folder, because the launcher runs it instead of `bridge.py`.
-
-> **Windows note (V3.9.4):** `start.bat` runs the bundled `bridge.exe`, which was rebuilt for V3.9.4 and includes the large-response fix, the version display and parallel server startup. If the popup still shows `bridge old`, close `start.bat` and start it again so the new `bridge.exe` is used. To run the bridge from source instead, install Python 3.9+ and `py -3 -m pip install websockets`, then run `py -3 bridge.py` in the project folder.
 
 ---
 
@@ -268,7 +232,6 @@ The AI sends commands, snapgentV3 runs them in the selected target (VS Code by d
 **Tips**
 
 - Keep the bridge window open — closing it disconnects the agent.
-- Keep your intended project open in VS Code; it is the default MCP target.
 - On **Arena**, use **Direct** mode.
 - If **Gemini** or **Kimi** stops using tools in a long session, remind it to use the snapgentV3 commands or start a new chat.
 
@@ -287,9 +250,8 @@ background.js               WebSocket connection to the local bridge
 manifest.json               browser permissions and content scripts
 ```
 
-The bridge routes commands to the configured MCP servers. Windows uses the
-bundled `bridge.exe`; macOS and Linux run the cross-platform `bridge.py` with
-Python.
+The bridge routes commands to the configured MCP servers. Linux runs the
+cross-platform `bridge.py` with Python.
 
 ---
 
@@ -304,32 +266,57 @@ snapgent-full/
 │   ├── manifest.json          # Manifest V3 configuration
 │   └── test-*.js              # Smoke tests
 ├── assets/                    # Project images
-├── setup-config.ps1           # Configures Windows MCP servers
-├── setup-config.py            # Detects MCP servers on macOS and Linux
+├── setup-config.py            # Configures the Linux workspace MCP server
 ├── config.json                # Generated locally by launchers (not tracked)
-├── start.bat                  # Windows bridge launcher
-├── MacOS_Start.command        # macOS bridge launcher
 ├── Linux_Start.sh             # Linux bridge launcher
-├── bridge.exe                 # Windows local bridge
 ├── bridge.py                  # Cross-platform Python MCP bridge
-├── vscode_mcp.exe             # Default VS Code MCP server (28 workspace tools)
-├── vscode_mcp.py              # VS Code MCP server source
+├── bridge_auth.py             # Handshake policy: origin allowlist, token file, rotation
+├── requirements.txt           # Pinned websockets range for the bridge
+├── workspace_mcp.py           # Workspace MCP server source (28 workspace tools)
 ├── test_bridge.py             # MCP bridge protocol tests
 ├── test_setup_config.py       # MCP setup helper tests
-└── vscode_mcp.spec            # PyInstaller build recipe
+├── test_workspace_mcp.py      # Workspace MCP server tests
+├── scripts/e2e_live.py        # Live e2e: real bridge + subprocess on an ephemeral port
+├── scripts/smoke_extension_live.py  # Live handshake/rotation smoke in headless Chrome
+└── sync-upstream.sh           # Sync with upstream, keeping purged paths deleted
 ```
 
 ---
 
-## `08` &nbsp; Troubleshooting
+## `08` &nbsp; Security & operations
+
+Every workspace tool is scoped to `ZS_WORKSPACE_ROOT`, with a
+resolve-check on every traversed entry so symlinks cannot leak files
+from outside the root. `run_command` blocks privilege-escalation and
+raw-disk binaries and caps its timeout at 300 s. The bridge restarts
+dead MCP servers with exponential backoff, and answers
+`get_bridge_status` with per-server pid, restart attempts, and RSS.
+
+Start with [`docs/security-and-ops.md`](docs/security-and-ops.md) for
+the containment model, the `run_command` policy, bridge recovery, and
+how to diagnose a running bridge (including opt-in JSON logging with
+`ZS_BRIDGE_LOG_JSON=1`). Code structure, naming, and test conventions
+are in [`docs/code-standards.md`](docs/code-standards.md).
+
+Tests: `/usr/bin/python3 -m pytest -q` (Python), `node
+snapgent-extension/test-*.js` (extension stub-DOM), and
+`/usr/bin/python3 scripts/e2e_live.py` (live bridge + subprocess).
+GitHub Actions runs the same suites on every push/PR. The pairing and rotation
+handshake needs a real browser, so it has its own manual smoke:
+`/usr/bin/python3 scripts/smoke_extension_live.py` (headless Chrome, throwaway
+bridge on ports 17613/9333).
+
+---
+
+## `09` &nbsp; Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | snapgentV3 bar is missing | Extension is disabled or site access is blocked | Check the extension is enabled and allowed on the current AI chat site, then reload the tab |
-| Bridge is offline | Bridge is not running | Start `start.bat` (Windows), `MacOS_Start.command` (macOS), or run `bash Linux_Start.sh` (Linux) |
+| Bridge is offline | Bridge is not running | Run `bash Linux_Start.sh` (Linux) |
 | Popup shows `Bridge token required` | The bridge refuses the connection without its per-install token (close code 1008) | Paste the token from the bridge window or `~/.snapgent/bridge_token` into the popup field and press **Save** |
+| MCP server keeps dying / tools fail after a while | Subprocess crashed; the bridge restarts it with backoff (5 s → 300 s) | Send `get_bridge_status` over the WebSocket and check `restart_attempts`, `error`, and `log_tail` (see `docs/security-and-ops.md`) |
 | AI replies without using tools | Provider/model stopped following commands | Remind it to use snapgentV3 commands or start a new chat |
-| VS Code target is unavailable | The bridge is offline or the release is incomplete | Run `start.bat` from the extracted release folder and keep the project open in VS Code |
 | A configured MCP server is missing from the target dropdown | The server was switched off in the **MCP servers** panel, or the extension is outdated | Open **MCP servers** from the ⋯ menu on the snapgent bar and tick the server, then reload the extension in `chrome://extensions` and refresh the chat tab |
 | Target dropdown closes or the click does nothing | Older extension versions redrew the menu during status updates | Update to the latest release and reload the extension |
 

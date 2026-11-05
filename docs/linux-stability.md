@@ -6,15 +6,32 @@
   - `initialize`: 12s -> 30s
   - `tools/list`: 20s -> 30s
 - Reason: cold starts for `npx`-based MCP servers (for example `@modelcontextprotocol/server-filesystem`) can exceed the previous 12s limit on Linux.
-- `bridge.py`: WebSocket `Origin` allowlist plus a per-install token, and `vscode_mcp.py`
-  `tools/list` now advertises the catalog whenever a workspace root resolves (including
-  `ZS_WORKSPACE_ROOT`) instead of requiring a VS Code window. See "Bridge auth" below.
+- `bridge.py`: WebSocket `Origin` allowlist plus a per-install token, with rotation and
+  session revocation. See "Bridge auth" below.
 
 ## Targets verified
 
 - `repo`: 28 tools (stable Python MCP server, no npx dependency)
-- `vscode`: 28 tools (same backend)
 - Bridge endpoint: `ws://127.0.0.1:17613`
+
+## Client configuration
+
+Register the workspace MCP server with `ZS_WORKSPACE_ROOT` set:
+
+```json
+{
+  "mcpServers": {
+    "repo": {
+      "command": "/usr/bin/python3",
+      "args": ["/path/to/webmcp/workspace_mcp.py"],
+      "env": { "ZS_WORKSPACE_ROOT": "/path/to/project" }
+    }
+  }
+}
+```
+
+Client keys: Zed uses `context_servers`; Antigravity and Claude Code use
+`mcpServers`; Hermes uses its own MCP list.
 
 ## Bridge auth (troubleshooting)
 
@@ -39,8 +56,9 @@ violation)**, so the extension can tell them apart from "bridge not running".
   reconnects with that token; while it dials back in the popup reads
   `Token rotated · reconnecting` rather than `Bridge offline`, because a `1012`
   close is not a pairing failure. It returns to `Connected` within a second or two.
-  A raw client must reconnect with the token it received in the reply. Rotation is refused while `ZS_BRIDGE_TOKEN` pins the value. To rotate
-  by hand, delete `~/.snapgent/bridge_token` and restart the bridge, then pair again.
+  A raw client must reconnect with the token it received in the reply. Rotation is
+  refused while `ZS_BRIDGE_TOKEN` pins the value. To rotate by hand, delete
+  `~/.snapgent/bridge_token` and restart the bridge, then pair again.
 - **Check without starting**: `bash Linux_Start.sh --check` prints the Python and
   `websockets` versions, the auth mode, the token path and the endpoint, then exits
   without installing anything or starting the bridge.
@@ -63,15 +81,18 @@ Repeated rejections are logged at most once per minute, with a
 `(N more since the last report)` suffix, so an unpaired extension retrying every few
 seconds does not flood the log. A status of `Bridge offline` (rather than `Bridge
 token required`) means the bridge is not running: start it with
-`bash Linux_Start.sh` (`start.bat` on Windows).
+`bash Linux_Start.sh`.
+
 
 ## Workflow
 
+0. Run `bash sync-upstream.sh` to merge upstream/main.
 1. Work on `linux-stability`, never `main`.
 2. Before changing: `git fetch upstream && git merge upstream/main`
 3. Run `python3 -m unittest`
 4. Run `bash Linux_Start.sh` smoke test.
-5. After touching the handshake, run `python3 smoke_extension_live.py`: it loads the
-   extension in headless Chrome against a throwaway bridge and checks pairing, the
-   `1008` refusal, rotation (`1012`) and the reconnect. Needs Chrome and port 17613.
+5. After touching the handshake, run `python3 scripts/smoke_extension_live.py`: it
+   loads the extension in headless Chrome against a throwaway bridge and checks
+   pairing, the `1008` refusal, rotation (`1012`) and the reconnect. Needs Chrome and
+   free ports 17613 and 9333.
 6. Commit only after both pass.

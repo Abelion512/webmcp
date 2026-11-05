@@ -9,6 +9,62 @@ const DEFAULT_AI_URL = "https://chatgpt.com/";
 
 
 
+function fmtUptime(seconds) {
+  if (typeof seconds !== "number" || seconds < 0) return "";
+  if (seconds < 60) return `${Math.floor(seconds)}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  return `${Math.floor(seconds / 3600)}h${Math.floor((seconds % 3600) / 60)}m`;
+}
+
+function fmtRss(kib) {
+  if (typeof kib !== "number" || kib < 0) return "";
+  return kib >= 1024 * 1024
+    ? `${(kib / 1024 / 1024).toFixed(1)} GB`
+    : `${(kib / 1024).toFixed(1)} MB`;
+}
+
+// One line per server from the bridge diagnostic snapshot. Falls back to
+// the plain servers list when the bridge is old (no bridgeStatus).
+// textContent only - bridge error strings are never injected as HTML.
+function serverLines(s, list) {
+  const diag = s.bridgeStatus;
+  if (diag && Array.isArray(diag.servers) && diag.servers.length) {
+    return diag.servers.map((x) => {
+      const parts = [x.alive ? "●" : "○", x.id];
+      if (x.pid) parts.push(`pid ${x.pid}`);
+      parts.push(x.alive ? `${x.tools} tools` : "down");
+      const rss = fmtRss(x.rss_kib);
+      if (rss && x.alive) parts.push(rss);
+      if (x.restart_attempts > 0) {
+        parts.push(x.next_restart_in_seconds > 0
+          ? `retry ${x.restart_attempts} in ${Math.round(x.next_restart_in_seconds)}s`
+          : `retries ${x.restart_attempts}`);
+      }
+      let line = parts.join(" · ");
+      if (!x.alive && x.error) line += ` — ${String(x.error).slice(0, 60)}`;
+      return line;
+    });
+  }
+  return list.map((x) => `${x.alive ? "●" : "○"} ${x.id} (${x.alive ? x.tools + " tools" : "down"})`);
+}
+
+// The pairing controls are optional to the rest of the popup: the stub-DOM tests
+// (test-popup-status.js) define only the status nodes, and a popup.html from
+// before pairing has no #pair at all, so every lookup has to tolerate null.
+function element(id) {
+  return document.getElementById(id);
+}
+
+function setHidden(id, hidden) {
+  const node = element(id);
+  if (node) node.hidden = hidden;
+}
+
+function onClick(id, handler) {
+  const node = element(id);
+  if (node) node.addEventListener("click", handler);
+}
+
 function render(s) {
   const state = document.getElementById("state");
   const tools = document.getElementById("tools");
@@ -30,11 +86,11 @@ function render(s) {
     : s.rotatingToken ? "Token rotated · reconnecting"
     : "Bridge offline";
   // Only prompt for the token while the bridge is actively refusing us.
-  document.getElementById("pair").hidden = !(s.authRequired && !s.connected);
+  setHidden("pair", !(s.authRequired && !s.connected));
   // Offer to re-pair whenever a token is stored, including while connected.
-  document.getElementById("forget-token").hidden = !s.savedToken;
+  setHidden("forget-token", !s.savedToken);
   // Rotation needs an authenticated socket; the bridge applies the new token live.
-  document.getElementById("rotate-token").hidden = !(s.connected && s.savedToken);
+  setHidden("rotate-token", !(s.connected && s.savedToken));
   const ver = document.getElementById("ver");
   const extVer = chrome.runtime.getManifest().version;
   ver.textContent = !s.connected ? `ext v${extVer}`
@@ -42,30 +98,32 @@ function render(s) {
     : `ext v${extVer} · bridge old`;
   tools.textContent = s.connected
     ? `${s.tools || 0} tools`
+      + (s.bridgeStatus && s.bridgeStatus.uptime_seconds != null
+          ? ` · bridge up ${fmtUptime(s.bridgeStatus.uptime_seconds)}`
+          : "")
     : s.authRequired ? "Paste the token below"
     : s.rotatingToken ? "New token saved"
     : "Run start.bat";
-  servers.textContent = s.connected
-    ? list.map((x) => `${x.alive ? "●" : "○"} ${x.id} (${x.alive ? x.tools + " tools" : "down"})`).join("\n")
-    : "";
+  servers.textContent = s.connected ? serverLines(s, list).join("\n") : "";
 }
 
 function refresh() {
   chrome.runtime.sendMessage({ type: "status" }, (s) => s && render(s));
 }
 
-document.getElementById("reconnect").addEventListener("click", () => {
+onClick("reconnect", () => {
   chrome.runtime.sendMessage({ type: "reconnect" }, () => setTimeout(refresh, 600));
 });
-document.getElementById("restart").addEventListener("click", (e) => {
+onClick("restart", (e) => {
   e.target.textContent = "Restarting…";
   chrome.runtime.sendMessage({ type: "restart_mcp" }, () => {
     e.target.textContent = "⟳ Restart";
     setTimeout(refresh, 600);
   });
 });
-document.getElementById("save-token").addEventListener("click", () => {
-  const input = document.getElementById("token");
+onClick("save-token", () => {
+  const input = element("token");
+  if (!input) return;
   const value = input.value.trim();
   if (!value) return;
   chrome.storage.local.set({ bridgeToken: value }, () => {
@@ -73,7 +131,7 @@ document.getElementById("save-token").addEventListener("click", () => {
     chrome.runtime.sendMessage({ type: "reconnect" }, () => setTimeout(refresh, 800));
   });
 });
-document.getElementById("rotate-token").addEventListener("click", (e) => {
+onClick("rotate-token", (e) => {
   const button = e.target;
   button.textContent = "Rotating…";
   chrome.runtime.sendMessage({ type: "rotate_token" }, (r) => {
@@ -87,9 +145,10 @@ document.getElementById("rotate-token").addEventListener("click", (e) => {
     setTimeout(refresh, 600);
   });
 });
-document.getElementById("forget-token").addEventListener("click", () => {
+onClick("forget-token", () => {
   chrome.storage.local.remove("bridgeToken", () => {
-    document.getElementById("token").value = "";
+    const input = element("token");
+    if (input) input.value = "";
     // Reconnect without a token: the bridge answers 1008 and the pairing card
     // comes back, so a fresh token can be pasted.
     chrome.runtime.sendMessage({ type: "reconnect" }, () => setTimeout(refresh, 800));

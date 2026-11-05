@@ -4,7 +4,7 @@ Unit tests cover the bridge in isolation and the popup helpers in Node, but the
 handshake also depends on browser behaviour (extension Origin, WebSocket close
 ordering) that only a real browser shows. Run it by hand after touching auth:
 
-    python3 smoke_extension_live.py
+    python3 scripts/smoke_extension_live.py
 
 Needs Google Chrome, a free port 17613 and a free port 9333 (the CDP endpoint);
 uses a temp token file and profile, so the developer's own bridge token is
@@ -26,7 +26,7 @@ from pathlib import Path
 
 import websockets
 
-REPO = Path(__file__).resolve().parent
+REPO = Path(__file__).resolve().parent.parent  # repo root, not scripts/
 EXT = REPO / "snapgent-extension"
 PORT = 17613
 CDP = 9333
