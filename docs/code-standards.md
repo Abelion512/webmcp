@@ -24,10 +24,12 @@ review checklist that applies these sources at merge time.
 
 ```text
 bridge.py                  WebSocket bridge (asyncio subprocess supervisor)
+bridge_auth.py             Handshake policy: origin allowlist, token file, rotation
 workspace_mcp.py           Workspace MCP server (28 tools, stdio)
 setup-config.py            Writes config.json (Linux only)
 test_*.py                  Python unit tests (root, stdlib unittest style)
 scripts/e2e_live.py        Live e2e: real bridge + subprocess, ephemeral port
+scripts/smoke_extension_live.py  Live handshake/rotation smoke in headless Chrome
 snapgent-extension/
   background.js            Service worker: owns the bridge WebSocket
   popup.html / popup.js    Popup UI (status only, no logic)
@@ -89,9 +91,10 @@ Rules:
 | Check | Where | Command |
 | --- | --- | --- |
 | Python unit | CI `tests` job | `/usr/bin/python3 -m pytest -q` |
-| Python static (unused imports/names) | CI `tests` job | `python -m pyflakes workspace_mcp.py bridge.py test_*.py scripts/e2e_live.py setup-config.py` |
+| Python static (unused imports/names) | CI `tests` job | `python -m pyflakes workspace_mcp.py bridge.py bridge_auth.py test_*.py scripts/e2e_live.py scripts/smoke_extension_live.py setup-config.py` |
 | JS syntax + stub-DOM | CI `tests` job | `node --check` per file in review; `node snapgent-extension/test-*.js` |
 | Live e2e | CI `e2e` job | `python scripts/e2e_live.py` |
+| Pairing/rotation handshake | Manual (needs Chrome) | `python scripts/smoke_extension_live.py` |
 | Editor formatting baseline | `.editorconfig` | 4-space Python, 2-space JS/HTML/YAML, LF, final newline, 100-col soft limit |
 
 ## Known deviations (documented, not drift)

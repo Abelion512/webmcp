@@ -4,6 +4,8 @@ Deprecated/
 ExtensionPresentation/
 presentation/
 config.json
+# Local bridge auth token (normally ~/.snapgent/bridge_token)
+bridge_token
 
 # Build output and local backups
 routergent/

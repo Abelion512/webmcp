@@ -33,6 +33,15 @@ All notable changes to snapgentV3 Free are documented here.
   `get_bridge_status` per server (pid, RSS, uptime, retry countdown,
   truncated error) with an old-bridge fallback. Background polls it
   stale-guarded (5 s); `log_tail` contents are never sent to the popup.
+- **Bridge handshake auth (`bridge_auth.py`).** The bridge refuses a handshake
+  from a web-page `Origin` and, unless `ZS_BRIDGE_AUTH=0`, any client without
+  the per-install token in `~/.snapgent/bridge_token` (mode 600), closing with
+  `1008`. The popup pairs with that token, can forget it, and can rotate it:
+  the bridge answers with the new secret and only then closes every
+  authenticated session (`1012`), so a leaked token cannot keep a live
+  connection. `Linux_Start.sh --check` reports the auth setup without starting
+  the bridge, and `scripts/smoke_extension_live.py` exercises pairing, the
+  `1008` refusal, rotation and the reconnect in headless Chrome.
 - **`docs/code-standards.md`** (PEP 8, Google Python, Clean Code,
   Airbnb JS, test pyramid): repo structure, naming/function rules,
   documented deviations, and an audit snapshot. Enforcement added:

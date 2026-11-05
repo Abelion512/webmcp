@@ -50,6 +50,19 @@ def get_root() -> Path:
     return candidate
 
 
+def catalog_available() -> bool:
+    """Whether a workspace root resolves, so tools can be advertised.
+
+    The root can come from ZS_WORKSPACE_ROOT / MCP_ROOT (the "repo" target) or
+    from the active VS Code window, so this must not look at VS Code alone.
+    """
+    try:
+        get_root()
+    except (RuntimeError, OSError):
+        return False
+    return True
+
+
 def normalize_target(rel_or_abs: str, root: Path) -> Path:
     path = Path(rel_or_abs or ".")
     if not path.is_absolute():
