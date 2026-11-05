@@ -189,6 +189,11 @@ token, so a regular web page cannot drive your workspace through port 17613.
    `Bridge token required` together with a token field.
 3. Paste the token, press **Save**, and the popup reconnects as `Connected`.
 
+Updating? Replace the extension **and** the bridge from the same release: the
+check fails closed, and an extension that predates this change has no token
+field, so against a new bridge it can only report `Bridge offline`. Start the
+bridge with `ZS_BRIDGE_AUTH=0` to keep such an extension working.
+
 The extension keeps the token in `chrome.storage.local`. **🔑 Rotate token** (visible
 while connected) asks the bridge for a new secret and saves it on both sides; the
 bridge then closes every authenticated connection, so a leaked token cannot keep a

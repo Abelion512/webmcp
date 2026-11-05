@@ -6,14 +6,16 @@ ordering) that only a real browser shows. Run it by hand after touching auth:
 
     python3 smoke_extension_live.py
 
-Needs Google Chrome and a free port 17613; uses a temp token file and profile, so
-the developer's own bridge token is untouched. Exits non-zero on any failure.
+Needs Google Chrome, a free port 17613 and a free port 9333 (the CDP endpoint);
+uses a temp token file and profile, so the developer's own bridge token is
+untouched. It refuses to start if either port is taken, because it would then
+talk to whatever is already listening there. Exits non-zero on any failure.
 """
 import asyncio
-import hashlib
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -77,6 +79,12 @@ async def load_unpacked():
     return None
 
 
+def port_in_use(port):
+    with socket.socket() as probe:
+        probe.settimeout(0.5)
+        return probe.connect_ex(("127.0.0.1", port)) == 0
+
+
 def find_target(kind, suffix=None):
     for target in http("/json/list") or []:
         if target.get("type") == kind and (suffix is None or target.get("url", "").endswith(suffix)):
@@ -95,6 +103,13 @@ async def wait_until(check, timeout, interval=0.2):
 
 
 async def main():
+    for port, what in ((PORT, "bridge"), (CDP, "Chrome debugging")):
+        free = not port_in_use(port)
+        ok(f"port {port} is free for the {what}", free,
+           "something is already listening - stop it first")
+        if not free:
+            return
+
     tmp = Path(tempfile.mkdtemp(prefix="zs-smoke-"))
     token_path = tmp / "bridge_token"
     log_path = tmp / "bridge.log"
@@ -102,8 +117,9 @@ async def main():
            if k not in ("ZS_BRIDGE_TOKEN", "ZS_BRIDGE_AUTH", "ZS_BRIDGE_TOKEN_FILE")}
     env.update(ZS_BRIDGE_TOKEN_FILE=str(token_path), ZS_BRIDGE_PORT=str(PORT))
 
+    log_handle = open(log_path, "wb")
     bridge = subprocess.Popen([sys.executable, "bridge.py"], cwd=REPO, env=env,
-                              stdout=open(log_path, "wb"), stderr=subprocess.STDOUT)
+                              stdout=log_handle, stderr=subprocess.STDOUT)
     chrome = None
     try:
         ok("bridge listens", await wait_until(lambda: "listening on ws://" in tail(log_path), 25))
@@ -170,7 +186,7 @@ async def main():
             if not token_path.exists():
                 return ""
             value = token_path.read_text(encoding="utf-8").strip()
-            return value if hashlib.sha256(value.encode()).hexdigest() != hashlib.sha256(old_token.encode()).hexdigest() else ""
+            return value if value != old_token else ""
 
         rotated = await wait_until(new_token, 15)
         ok("bridge wrote a new token", rotated)
@@ -185,9 +201,15 @@ async def main():
         ok("worker reconnected with the new token", await wait_until(
             lambda: tail(log_path).count("extension connected") >= 2, 15))
         await asyncio.sleep(2)
+        ok("worker reports itself connected again",
+           await evaluate(worker["webSocketDebuggerUrl"], "connected") is True)
         after = await read_state()
+        # A connected popup reads Connected / No Studio / Open Studio, depending on
+        # which MCP servers exist here, so judge by the failure texts instead.
         ok("popup settles on a live state",
-           after and "reconnecting" not in after and "Bridge token required" not in after, after)
+           bool(after) and not any(word in after for word in
+                                   ("Bridge offline", "reconnecting", "Bridge token required")),
+           after)
     finally:
         for process in (chrome, bridge):
             if process and process.poll() is None:
@@ -196,6 +218,7 @@ async def main():
                     process.wait(timeout=10)
                 except subprocess.TimeoutExpired:
                     process.kill()
+        log_handle.close()
         print("\n--- bridge log ---")
         print(tail(log_path, 2000))
         shutil.rmtree(tmp, ignore_errors=True)
@@ -208,5 +231,6 @@ def tail(path, size=4000):
         return ""
 
 
-asyncio.run(main())
-sys.exit(0 if results and all(results) else 1)
+if __name__ == "__main__":
+    asyncio.run(main())
+    sys.exit(0 if results and all(results) else 1)

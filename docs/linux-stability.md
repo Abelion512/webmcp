@@ -33,7 +33,8 @@ violation)**, so the extension can tell them apart from "bridge not running".
   copy and prompts again. `🔑 Rotate token` (shown while connected) asks the bridge to
   generate a new secret and write it to the token file. The bridge replies with the
   new token first, then **closes every authenticated connection** (close code `1012`,
-  "service restart") so no session keeps running on the old secret. The extension
+  reason `bridge token rotated; reconnect with the new token`) so no session keeps
+  running on the old secret. The extension
   resolves the `token_rotated` reply (the bridge sends it before the close) and
   reconnects with that token; while it dials back in the popup reads
   `Token rotated · reconnecting` rather than `Bridge offline`, because a `1012`
