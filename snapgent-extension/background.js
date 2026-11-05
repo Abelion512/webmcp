@@ -70,13 +70,18 @@ function log(...a) {
 
 // ── WebSocket lifecycle ─────────────────────────────────────────────────
 function readBridgeToken() {
+  // Never leave connect() awaiting this: it holds the `connecting` guard, and a
+  // callback that never fires (invalidated extension context) would then block
+  // every future reconnect for the life of the worker. Fall back to "no token".
   return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(""), 2000);
+    const done = (value) => { clearTimeout(timer); resolve(value || ""); };
     try {
       chrome.storage.local.get(TOKEN_KEY, (values) => {
-        resolve((values && values[TOKEN_KEY]) || "");
+        done(values && values[TOKEN_KEY]);
       });
     } catch {
-      resolve("");
+      done("");
     }
   });
 }
