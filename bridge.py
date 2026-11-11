@@ -774,10 +774,16 @@ async def run() -> None:
             f"'{sys.executable} -m pip install websockets'."
         )
     bridge = Bridge()
+    # Defend against Cross-Site WebSocket Hijacking: only the extension (and
+    # non-browser/local clients that send no Origin) may connect. A web page
+    # cannot spoof the Origin header, so this blocks drive-by RCE via the
+    # local bridge.
+    allowed_origins = [None, re.compile(r"chrome-extension://.*"), re.compile(r"moz-extension://.*")]
     server = await websockets.serve(
         bridge.handle_client,
         HOST,
         PORT,
+        origins=allowed_origins,
         max_size=50 * 1024 * 1024,
         ping_interval=20,
         ping_timeout=20,
