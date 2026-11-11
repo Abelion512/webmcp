@@ -255,9 +255,10 @@ def _sandboxed_argv(command: List[str], root: Path) -> List[str]:
 
 
 def _run_process(command: List[str], root: Path, timeout: int = 30) -> str:
-    command = _sandboxed_argv(command, root)
+    original = list(command)
+    sandboxed = _sandboxed_argv(original, root)
     result = subprocess.run(
-        command,
+        sandboxed,
         cwd=str(root),
         capture_output=True,
         text=True,
@@ -267,6 +268,37 @@ def _run_process(command: List[str], root: Path, timeout: int = 30) -> str:
         timeout=timeout,
         check=False,
     )
+    # If bubblewrap itself fails to set up (permissions, user namespaces,
+    # missing helpers), retry the command unsandboxed instead of surfacing
+    # a sandbox setup error as a tool failure.
+    if sandboxed != original:
+        stderr = (result.stderr or "")
+        if (
+            result.returncode != 0
+            and (
+                "bwrap:" in stderr
+                or "Permission denied" in stderr
+                or "Operation not permitted" in stderr
+                or "setting up uid map" in stderr
+            )
+        ):
+            last = stderr.strip().splitlines()[-1] if stderr.strip() else "unknown"
+            sys.stderr.write(
+                "workspace_mcp: sandbox setup failed; retrying unsandboxed: "
+                + last
+                + "\n"
+            )
+            result = subprocess.run(
+                original,
+                cwd=str(root),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                shell=False,
+                timeout=timeout,
+                check=False,
+            )
     output = result.stdout.strip() or result.stderr.strip() or "(no output)"
     if result.returncode:
         raise RuntimeError(
