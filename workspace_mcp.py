@@ -120,14 +120,21 @@ def _sandbox_network_enabled() -> bool:
 _SECURE_DEVNULL: Optional[str] = None
 
 
-def _secure_devnull() -> str:
+def _secure_devnull() -> Optional[str]:
     """Return a path to a regular, non-symlinkable /dev/null stand-in."""
     global _SECURE_DEVNULL
     if _SECURE_DEVNULL and os.path.isfile(_SECURE_DEVNULL) and not os.path.islink(
         _SECURE_DEVNULL
     ):
         return _SECURE_DEVNULL
-    fd, path = tempfile.mkstemp(prefix=".snapgent-devnull-", dir="/tmp")
+    try:
+        fd, path = tempfile.mkstemp(prefix=".snapgent-devnull-", dir="/tmp")
+    except OSError as exc:
+        sys.stderr.write(
+            "workspace_mcp: could not create sandbox /dev/null stand-in "
+            f"({exc}); running command unsandboxed\n"
+        )
+        return None
     os.close(fd)
     _SECURE_DEVNULL = path
     return path
@@ -218,6 +225,8 @@ def _sandboxed_argv(command: List[str], root: Path) -> List[str]:
     # in the world-writable /tmp cannot redirect the bind to an arbitrary
     # host file.
     devnull_path = _secure_devnull()
+    if not devnull_path:
+        return list(command)
     argv: List[str] = [bwrap, "--die-with-parent", "--unshare-pid"]
     network_disabled = not _sandbox_network_enabled()
     if network_disabled and _bwrap_supports_unshare_net():
