@@ -174,6 +174,30 @@ async def run_checks(port):
             check("run_command_timeout_rejected",
                   r.get("ok") is False and "timeout" in r.get("error", ""), r.get("error", ""))
 
+            # OS-level sandbox (bubblewrap): cwd is the mapped workspace and
+            # /home is masked; network is off by default.
+            import shutil as _shutil
+            if _shutil.which("bwrap"):
+                r = await call(ws, 22, "run_command", {"command": "pwd", "args": [], "timeout": 10})
+                check("sandbox_cwd_is_workspace",
+                      r.get("ok") and r.get("text", "").strip() == "/tmp/workspace",
+                      r.get("text", "") or r.get("error", ""))
+                r = await call(ws, 23, "run_command",
+                               {"command": "ls", "args": ["/home"], "timeout": 10})
+                check("sandbox_home_masked",
+                      r.get("ok") and r.get("text", "").strip() in ("", "(no output)"),
+                      r.get("text", "") or r.get("error", ""))
+                r = await call(ws, 24, "run_command",
+                               {"command": "python3",
+                                "args": ["-c",
+                                         "import urllib.request; print(urllib.request.urlopen('http://example.com', timeout=3).status)"],
+                                "timeout": 10})
+                check("sandbox_network_blocked",
+                      r.get("ok") is False,
+                      r.get("text", "") or r.get("error", ""))
+            else:
+                check("sandbox_skipped", True, "bwrap unavailable")
+
             # write / edit / read / delete roundtrip
             r = await call(ws, 13, "write_file",
                            {"path": "e2e_live_tmp.txt", "content": "alpha beta"})

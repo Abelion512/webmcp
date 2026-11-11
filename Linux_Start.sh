@@ -2,6 +2,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 set -u
 
+# Capture the terminal's original working directory before we cd into the
+# script directory. This becomes the scoped workspace root for the MCP
+# server so commands run where the user launched Start_Linux.
+ZS_TERMINAL_WORKDIR="${PWD}"
+export ZS_WORKSPACE_ROOT="${ZS_WORKSPACE_ROOT:-$ZS_TERMINAL_WORKDIR}"
+
 cd "$(dirname "$0")" || exit 1
 
 BRIDGE_PORT="${ZS_BRIDGE_PORT:-17613}"

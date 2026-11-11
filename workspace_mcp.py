@@ -111,7 +111,59 @@ def _iter_files(base: Path, root: Path) -> Iterable[Path]:
                 yield candidate
 
 
+def _sandbox_network_enabled() -> bool:
+    value = os.environ.get("ZS_SANDBOX_NETWORK", "0").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _sandboxed_argv(command: List[str], root: Path) -> List[str]:
+    """Wrap a command in bubblewrap (OpenAI/Anthropic-style OS sandbox).
+
+    Filesystem: the host root is mounted read-only and only the workspace
+    root (plus an ephemeral /tmp) is writable; /home and /root are masked
+    with tmpfs so user secrets outside the workspace are not readable.
+    Network: disabled by default (ZS_SANDBOX_NETWORK=1 to allow).
+    Namespace: a fresh PID namespace plus process cleanup on parent exit.
+    Falls back to the unsandboxed command when bubblewrap is unavailable.
+    """
+    if os.name == "nt":
+        return list(command)
+    # A writable (regular-file) /dev/null: bwrap's --dev mount is nodev, so
+    # device nodes cannot be opened O_RDWR, which breaks git and others.
+    try:
+        Path("/tmp/.snapgent-devnull").touch(exist_ok=True)
+    except OSError:
+        pass
+    bwrap = shutil.which("bwrap")
+    if not bwrap:
+        return list(command)
+    argv: List[str] = [bwrap, "--die-with-parent", "--unshare-pid"]
+    if not _sandbox_network_enabled():
+        argv.append("--unshare-net")
+    argv += [
+        "--proc", "/proc",
+        "--dev", "/dev",
+        "--ro-bind", "/", "/",
+        "--bind", "/tmp/.snapgent-devnull", "/dev/null",
+        "--tmpfs", "/tmp",
+        "--dir", "/tmp/workspace",
+        "--tmpfs", "/home",
+        "--tmpfs", "/root",
+        "--tmpfs", "/mnt",
+        "--tmpfs", "/media",
+        "--bind", str(root), "/tmp/workspace",
+        "--chdir", "/tmp/workspace",
+        "--setenv", "HOME", "/tmp",
+        "--setenv", "TMPDIR", "/tmp",
+        "--setenv", "ZS_WORKSPACE_ROOT", "/tmp/workspace",
+        "--",
+    ]
+    argv += list(command)
+    return argv
+
+
 def _run_process(command: List[str], root: Path, timeout: int = 30) -> str:
+    command = _sandboxed_argv(command, root)
     result = subprocess.run(
         command,
         cwd=str(root),
