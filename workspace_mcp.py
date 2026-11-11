@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -116,6 +117,47 @@ def _sandbox_network_enabled() -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
+_SECURE_DEVNULL: Optional[str] = None
+
+
+def _secure_devnull() -> str:
+    """Return a path to a regular, non-symlinkable /dev/null stand-in."""
+    global _SECURE_DEVNULL
+    if _SECURE_DEVNULL and os.path.isfile(_SECURE_DEVNULL) and not os.path.islink(
+        _SECURE_DEVNULL
+    ):
+        return _SECURE_DEVNULL
+    fd, path = tempfile.mkstemp(prefix=".snapgent-devnull-", dir="/tmp")
+    os.close(fd)
+    _SECURE_DEVNULL = path
+    return path
+
+
+_UNSHARE_NET_SUPPORTED: Optional[bool] = None
+
+
+def _bwrap_supports_unshare_net() -> bool:
+    global _UNSHARE_NET_SUPPORTED
+    if _UNSHARE_NET_SUPPORTED is not None:
+        return _UNSHARE_NET_SUPPORTED
+    bwrap = shutil.which("bwrap")
+    if not bwrap:
+        _UNSHARE_NET_SUPPORTED = False
+        return False
+    try:
+        result = subprocess.run(
+            [bwrap, "--unshare-net", "--", "/bin/true"],
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        _UNSHARE_NET_SUPPORTED = False
+        return False
+    _UNSHARE_NET_SUPPORTED = result.returncode == 0
+    return _UNSHARE_NET_SUPPORTED
+
+
 def _sandboxed_argv(command: List[str], root: Path) -> List[str]:
     """Wrap a command in bubblewrap (OpenAI/Anthropic-style OS sandbox).
 
@@ -128,30 +170,46 @@ def _sandboxed_argv(command: List[str], root: Path) -> List[str]:
     """
     if os.name == "nt":
         return list(command)
-    # A writable (regular-file) /dev/null: bwrap's --dev mount is nodev, so
-    # device nodes cannot be opened O_RDWR, which breaks git and others.
-    try:
-        Path("/tmp/.snapgent-devnull").touch(exist_ok=True)
-    except OSError:
-        pass
     bwrap = shutil.which("bwrap")
     if not bwrap:
+        # Silent degradation is undesirable; make it visible on stderr so
+        # operators know the advertised sandbox is inactive.
+        sys.stderr.write(
+            "workspace_mcp: bubblewrap not found; running command unsandboxed\n"
+        )
         return list(command)
+    # A writable (regular-file) /dev/null: bwrap's --dev mount is nodev, so
+    # device nodes cannot be opened O_RDWR, which breaks git and others.
+    # Create it with O_EXCL|O_NOFOLLOW via mkstemp so a pre-existing symlink
+    # in the world-writable /tmp cannot redirect the bind to an arbitrary
+    # host file.
+    devnull_path = _secure_devnull()
     argv: List[str] = [bwrap, "--die-with-parent", "--unshare-pid"]
-    if not _sandbox_network_enabled():
+    network_disabled = not _sandbox_network_enabled()
+    if network_disabled and _bwrap_supports_unshare_net():
         argv.append("--unshare-net")
+    elif network_disabled:
+        sys.stderr.write(
+            "workspace_mcp: bwrap --unshare-net unsupported; "
+            "network not isolated\n"
+        )
     argv += [
         "--proc", "/proc",
         "--dev", "/dev",
         "--ro-bind", "/", "/",
-        "--bind", "/tmp/.snapgent-devnull", "/dev/null",
+        "--bind", devnull_path, "/dev/null",
+        # tmpfs /tmp first, then bind the workspace into it.
         "--tmpfs", "/tmp",
         "--dir", "/tmp/workspace",
+        # Bind the workspace before masking /home, /root, /mnt, /media so a
+        # workspace that lives under one of those directories is not hidden
+        # by the empty tmpfs mounts. The source path is resolved against the
+        # already-mounted host root (read-only at /), so it stays reachable.
+        "--bind", str(root), "/tmp/workspace",
         "--tmpfs", "/home",
         "--tmpfs", "/root",
         "--tmpfs", "/mnt",
         "--tmpfs", "/media",
-        "--bind", str(root), "/tmp/workspace",
         "--chdir", "/tmp/workspace",
         "--setenv", "HOME", "/tmp",
         "--setenv", "TMPDIR", "/tmp",
