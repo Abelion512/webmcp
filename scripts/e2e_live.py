@@ -179,7 +179,15 @@ async def run_checks(port):
             import shutil as _shutil
             import subprocess as _subprocess
             bwrap = _shutil.which("bwrap")
+            usable = False
             if bwrap:
+                try:
+                    usable = _subprocess.run(
+                        [bwrap, "--ro-bind", "/", "/", "--", "/bin/true"], capture_output=True, timeout=5,
+                    ).returncode == 0
+                except Exception:
+                    usable = False
+            if bwrap and usable:
                 r = await call(ws, 22, "run_command", {"command": "pwd", "args": [], "timeout": 10})
                 check("sandbox_cwd_is_workspace",
                       r.get("ok") and r.get("text", "").strip() == "/tmp/workspace",
@@ -192,7 +200,7 @@ async def run_checks(port):
                 net_supported = False
                 try:
                     net_supported = _subprocess.run(
-                        [bwrap, "--unshare-net", "--", "/bin/true"],
+                        [bwrap, "--unshare-net", "--ro-bind", "/", "/", "--", "/bin/true"],
                         capture_output=True, timeout=5,
                     ).returncode == 0
                 except Exception:

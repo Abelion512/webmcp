@@ -133,6 +133,31 @@ def _secure_devnull() -> str:
     return path
 
 
+_BWRAP_USABLE: Optional[bool] = None
+
+
+def _bwrap_usable() -> bool:
+    global _BWRAP_USABLE
+    if _BWRAP_USABLE is not None:
+        return _BWRAP_USABLE
+    bwrap = shutil.which("bwrap")
+    if not bwrap:
+        _BWRAP_USABLE = False
+        return False
+    try:
+        result = subprocess.run(
+            [bwrap, "--ro-bind", "/", "/", "--", "/bin/true"],
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        _BWRAP_USABLE = False
+        return False
+    _BWRAP_USABLE = result.returncode == 0
+    return _BWRAP_USABLE
+
+
 _UNSHARE_NET_SUPPORTED: Optional[bool] = None
 
 
@@ -140,13 +165,16 @@ def _bwrap_supports_unshare_net() -> bool:
     global _UNSHARE_NET_SUPPORTED
     if _UNSHARE_NET_SUPPORTED is not None:
         return _UNSHARE_NET_SUPPORTED
+    if not _bwrap_usable():
+        _UNSHARE_NET_SUPPORTED = False
+        return False
     bwrap = shutil.which("bwrap")
     if not bwrap:
         _UNSHARE_NET_SUPPORTED = False
         return False
     try:
         result = subprocess.run(
-            [bwrap, "--unshare-net", "--", "/bin/true"],
+            [bwrap, "--unshare-net", "--ro-bind", "/", "/", "--", "/bin/true"],
             capture_output=True,
             timeout=5,
             check=False,
@@ -176,6 +204,12 @@ def _sandboxed_argv(command: List[str], root: Path) -> List[str]:
         # operators know the advertised sandbox is inactive.
         sys.stderr.write(
             "workspace_mcp: bubblewrap not found; running command unsandboxed\n"
+        )
+        return list(command)
+    if not _bwrap_usable():
+        sys.stderr.write(
+            "workspace_mcp: bubblewrap unusable in this environment; "
+            "running command unsandboxed\n"
         )
         return list(command)
     # A writable (regular-file) /dev/null: bwrap's --dev mount is nodev, so
