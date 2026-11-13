@@ -105,7 +105,21 @@ class TaskStore:
             self._tasks[task["id"]] = task
             # ponytail: cap the store; add TTL eviction if tasks ever outlive a session.
             while len(self._tasks) > MAX_TASKS:
-                self._tasks.pop(next(iter(self._tasks)))
+                # Never evict a task whose submit is still waiting for its
+                # reply: the caller would poll a vanished id and hang out the
+                # full timeout. Evict finished tasks first; if none exist the
+                # cap is exceeded momentarily rather than dropping live work.
+                def _pending(task_value: Dict[str, Any]) -> bool:
+                    state = (task_value.get("status") or {}).get("state")
+                    return state in ("TASK_STATE_SUBMITTED", "TASK_STATE_WORKING")
+
+                finished = [task_id for task_id, task_value in self._tasks.items() if not _pending(task_value)]
+                if not finished:
+                    break
+                oldest_finished = next(
+                    task_id for task_id in self._tasks if task_id in finished
+                )
+                self._tasks.pop(oldest_finished)
 
     def get(self, task_id: str) -> Optional[Dict[str, Any]]:
         with self._lock:
@@ -380,12 +394,15 @@ class A2AServer:
         if task is None:
             return None
         view = copy.deepcopy(task)
+        # History semantics: the most recent messages, not the oldest.
         if (
             isinstance(history_length, int)
             and not isinstance(history_length, bool)
             and history_length >= 0
         ):
-            view["history"] = view.get("history", [])[:history_length]
+            # [-0:] is the whole list (negative zero), so 0 needs its own arm.
+            history = view.get("history", [])
+            view["history"] = [] if history_length == 0 else history[-history_length:]
         return view
 
 

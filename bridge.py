@@ -288,8 +288,12 @@ class Bridge:
         self._pending_prompts: Dict[str, asyncio.Future] = {}
         self._prompt_lock = asyncio.Lock()
         # The socket a pending prompt belongs to. Only that socket may resolve it:
-        # the extension websocket is unauthenticated, so a second local socket must
-        # not be able to spoof a reply.
+        # a reply is trusted only from the socket the prompt was delivered to.
+        # NOTE: `self.clients` itself is gated by the bridge token handshake on
+        # the hardened lineage (PR #1); on this branch the origin allowlist is
+        # the only gate, so the A2A caller's prompt text can reach whichever
+        # local client connected last. Do not rely on that here without the
+        # token auth merged in.
         self._prompt_owner: Any = None
         self._last_client: Any = None
 
@@ -393,11 +397,18 @@ class Bridge:
             return_exceptions=True,
         )
 
-    async def _send_client(self, client: Any, message: Dict[str, Any]) -> None:
+    async def _send_client(self, client: Any, message: Dict[str, Any]) -> bool:
+        """Send and report delivery so callers can fail fast.
+
+        A dropped socket used to be swallowed here: a prompt sent to an owner
+        that had just disconnected would silently never arrive and the A2A
+        caller would wait out the whole timeout.
+        """
         try:
             await client.send(_json_line(message))
         except Exception:
-            pass
+            return False
+        return True
 
     def _fail_pending_prompts(self, reason: str) -> None:
         for future in list(self._pending_prompts.values()):
@@ -433,7 +444,9 @@ class Bridge:
             self._pending_prompts[prompt_id] = future
             self._prompt_owner = client
             try:
-                await self._send_client(client, {"type": "submit_prompt", "id": prompt_id, "prompt": prompt})
+                sent = await self._send_client(client, {"type": "submit_prompt", "id": prompt_id, "prompt": prompt})
+                if not sent:
+                    return {"ok": False, "error": "The Snapgent extension disconnected before the prompt could be delivered."}
                 return await asyncio.wait_for(future, remaining)
             except asyncio.TimeoutError:
                 return timed_out
@@ -477,7 +490,10 @@ class Bridge:
             async with self._client_lock:
                 self.clients.discard(websocket)
                 remaining = bool(self.clients)
-            if not remaining:
+            # Fail prompts owned by the departing socket even when other
+            # clients remain: otherwise the caller waits the full timeout on
+            # an owner that will never answer.
+            if not remaining or self._prompt_owner is websocket:
                 self._fail_pending_prompts("The extension disconnected.")
             log("extension disconnected")
 
