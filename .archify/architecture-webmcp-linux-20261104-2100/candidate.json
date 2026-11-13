@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "snapgentV3 — Linux-only scoped MCP workspace server",
+    "subtitle": "Branch linux-stability · webmcp",
+    "output": "webmcp-architecture.html",
+    "quality_profile": "showcase",
+    "legend": {
+      "mode": "all",
+      "entries": {
+        "frontend": { "label": "Browser / extension", "visible": true },
+        "backend": { "label": "Local bridge / MCP server", "visible": true },
+        "external": { "label": "User / AI chat", "visible": true },
+        "cloud": { "label": "Config artifact", "visible": true },
+        "database": { "label": "Scoped workspace folder", "visible": true }
+      }
+    }
+  },
+  "components": [
+    { "id": "user", "type": "external", "label": "AI chat di browser", "sublabel": "ChatGPT / Claude / Gemini / Qwen / …", "pos": [40, 260], "size": [150, 64], "icon": "person" },
+    { "id": "extension", "type": "frontend", "label": "snapgentV3 ekstensi", "sublabel": "Manifest V3 · content script per situs", "pos": [260, 260], "size": [170, 64], "icon": "frontend" },
+    { "id": "bridge", "type": "backend", "label": "bridge.py", "sublabel": "WebSocket :17613", "pos": [500, 260], "size": [160, 64], "icon": "backend" },
+    { "id": "mcp", "type": "backend", "label": "workspace_mcp.py", "sublabel": "28 MCP tools · stdlib-only", "pos": [730, 260], "size": [170, 64], "icon": "backend" },
+    { "id": "config", "type": "cloud", "label": "config.json", "sublabel": "mcpServers.repo + ZS_WORKSPACE_ROOT", "pos": [500, 430], "size": [160, 60], "icon": "cloud" },
+    { "id": "workspace", "type": "database", "label": "Workspace terpancung", "sublabel": "satu folder, root dari env", "pos": [730, 430], "size": [170, 60], "icon": "database" }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "Browser (pengguna)", "wraps": ["user", "extension"], "pad": 18 },
+    { "kind": "region", "label": "Host lokal (Linux)", "wraps": ["bridge", "mcp", "config", "workspace"], "pad": 18 }
+  ],
+  "connections": [
+    { "id": "user-to-ext", "from": "user", "to": "extension", "label": "perintah snapgentV3", "variant": "emphasis" },
+    { "id": "ext-to-bridge", "from": "extension", "to": "bridge", "label": "WebSocket ws://127.0.0.1:17613", "variant": "default" },
+    { "id": "bridge-to-mcp", "from": "bridge", "to": "mcp", "label": "stdio MCP (2024-11-05)", "variant": "default" },
+    { "id": "bridge-to-config", "from": "bridge", "to": "config", "label": "muat mcpServers", "variant": "dashed", "fromSide": "bottom", "toSide": "top" },
+    { "id": "mcp-to-workspace", "from": "mcp", "to": "workspace", "label": "baca / tulis / edit / git", "variant": "default", "fromSide": "bottom", "toSide": "top" }
+  ],
+  "cards": [
+    { "dot": "emerald", "title": "Data flow", "items": ["AI chat → ekstensi → bridge → MCP server → workspace folder"] },
+    { "dot": "cyan", "title": "Klien MCP langsung", "items": ["Zed, Claude Code, Antigravity, Hermes terhubung langsung ke workspace_mcp.py via stdio"] },
+    { "dot": "rose", "title": "Linux-only scoped", "items": ["Root wajib ZS_WORKSPACE_ROOT / MCP_ROOT, tidak ada auto-deteksi VS Code", "Tidak ada Roblox, Effect Craft, artefak Windows/macOS"] }
+  ]
+}
