@@ -15,6 +15,48 @@ All notable changes to snapgentV3 Free are documented here.
   provider tab and relays the result back; `core/main.js` runs the prompt
   through the existing agentic loop.
 - **Docs and skill:** `docs/a2a.md` plus `.snapgent/skills/a2a-bridge/SKILL.md`.
+- **Symlink traversal guard (`workspace_mcp.py`).** Traversal helpers
+  resolve every entry and skip anything whose target escapes the
+  workspace root, so a symlinked file can no longer leak external
+  content through `search_files`/`find_files`/`list_tree`/`list_dir`.
+  Internal symlinks (resolving inside the root) still work.
+- **`run_command` bounds.** Optional `timeout` (5–300 s, default 30),
+  an exact-basename deny list for privilege-escalation and raw-disk
+  binaries (`sudo`, `dd`, `mkfs*`, …), and shell-metacharacter
+  rejection on the Windows branch. The tool catalog stays at 28 tools.
+- **Bridge auto-recovery backoff.** The dead-server monitor now retries
+  with exponential backoff (5 s → 300 s cap) instead of a fixed 5 s, and
+  a tool call against a dead server gets one inline restart before it
+  fails as `unknown_tool`.
+- **`get_bridge_status` bridge request.** Returns bridge version,
+  uptime, connected clients, and per-server pid / alive / tools /
+  error / restart attempts / RSS, plus the last 30 log lines.
+- **Structured JSON bridge logging (opt-in).** `ZS_BRIDGE_LOG_JSON=1`
+  switches `logs/bridge_debug.log` to one JSON object per line; the
+  default text format is unchanged.
+- **Live e2e script (`scripts/e2e_live.py`)** and GitHub Actions
+  (`tests.yml`: Python + Node stub-DOM suites, plus e2e job) with
+  matching path labels in `labeler.yml`.
+- **`docs/security-and-ops.md`:** containment model, `run_command`
+  policy, bridge recovery, and how to diagnose a running bridge.
+- **Extension UX for bridge diagnostics:** popup now renders
+  `get_bridge_status` per server (pid, RSS, uptime, retry countdown,
+  truncated error) with an old-bridge fallback. Background polls it
+  stale-guarded (5 s); `log_tail` contents are never sent to the popup.
+- **Bridge handshake auth (`bridge_auth.py`).** The bridge refuses a handshake
+  from a web-page `Origin` and, unless `ZS_BRIDGE_AUTH=0`, any client without
+  the per-install token in `~/.snapgent/bridge_token` (mode 600), closing with
+  `1008`. The popup pairs with that token, can forget it, and can rotate it:
+  the bridge answers with the new secret and only then closes every
+  authenticated session (`1012`), so a leaked token cannot keep a live
+  connection. `Linux_Start.sh --check` reports the auth setup without starting
+  the bridge, and `scripts/smoke_extension_live.py` exercises pairing, the
+  `1008` refusal, rotation and the reconnect in headless Chrome.
+- **`docs/code-standards.md`** (PEP 8, Google Python, Clean Code,
+  Airbnb JS, test pyramid): repo structure, naming/function rules,
+  documented deviations, and an audit snapshot. Enforcement added:
+  `.editorconfig`, `pyproject.toml`, pyflakes + `node --check` in CI,
+  and `test-popup-status.js`. One pre-existing unused import removed.
 
 ### Changed
 - **MCP server renamed:** `vscode_mcp.py` is now `workspace_mcp.py`, a generic

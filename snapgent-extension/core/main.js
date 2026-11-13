@@ -3626,7 +3626,11 @@
       // Assistant Settings > MCP Servers inside the already-open Studio.
       const procUp = s.studioProc === true;
       let txt;
-      if (!s.connected) txt = "Bridge offline, run start.bat";
+      // A 1012 close means the bridge rotated its token and is waiting for the
+      // worker to dial back in, so don't tell the user to start the bridge.
+      if (!s.connected) txt = s.rotatingToken
+        ? "Bridge token rotated - reconnecting"
+        : "Bridge offline, run start.bat";
       else if (!mcpOk) txt = "Bridge OK, open Roblox Studio";
       else if (noPlace) txt = "Roblox Studio is open but no place is loaded - open a place";
       else if (noApp) txt = procUp

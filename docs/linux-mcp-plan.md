@@ -5,7 +5,8 @@ Branch: `linux-stability`
 
 ## Global Constraints
 
-- Python 3.9+ standard library only. No new dependencies.
+- `workspace_mcp.py` is Python 3.9+ standard library only; no new dependencies.
+  (`bridge.py` uses the pre-existing `websockets` package.)
 - MCP protocol version string stays `2024-11-05`.
 - 28 tools, exactly, with names unchanged. Tool names are a public contract.
 - Workspace root comes only from `ZS_WORKSPACE_ROOT` or `MCP_ROOT`.
