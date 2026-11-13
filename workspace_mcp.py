@@ -126,6 +126,12 @@ def _secure_devnull() -> Optional[str]:
     if _SECURE_DEVNULL and os.path.isfile(_SECURE_DEVNULL) and not os.path.islink(
         _SECURE_DEVNULL
     ):
+        # Every sandboxed command's >/dev/null lands in this file; reset it
+        # per bind so a long-lived server cannot fill the host disk.
+        try:
+            open(_SECURE_DEVNULL, "w").close()
+        except OSError:
+            pass
         return _SECURE_DEVNULL
     try:
         fd, path = tempfile.mkstemp(prefix=".snapgent-devnull-", dir="/tmp")
@@ -237,10 +243,17 @@ def _sandboxed_argv(command: List[str], root: Path) -> List[str]:
             "network not isolated\n"
         )
     argv += [
+        # Mount order matters: the read-only host root must bind FIRST. Fresh
+        # /proc and /dev mounts placed before it would be shadowed by the host
+        # root bind, leaking host PIDs and devices into the sandbox.
+        "--ro-bind", "/", "/",
         "--proc", "/proc",
         "--dev", "/dev",
-        "--ro-bind", "/", "/",
         "--bind", devnull_path, "/dev/null",
+        # Commands here never need runtime state or spool files, so hide the
+        # host /run and /var (logs, sockets, package databases) entirely.
+        "--tmpfs", "/run",
+        "--tmpfs", "/var",
         # tmpfs /tmp first, then bind the workspace into it.
         "--tmpfs", "/tmp",
         "--dir", "/tmp/workspace",
@@ -254,8 +267,15 @@ def _sandboxed_argv(command: List[str], root: Path) -> List[str]:
         "--tmpfs", "/mnt",
         "--tmpfs", "/media",
         "--chdir", "/tmp/workspace",
+        # Only an explicit allowlist reaches the command: the server process
+        # carries bridge/API secrets in its environment that must not leak
+        # into sandboxed subprocess output.
+        "--clearenv",
         "--setenv", "HOME", "/tmp",
         "--setenv", "TMPDIR", "/tmp",
+        "--setenv", "PATH", os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        "--setenv", "LANG", os.environ.get("LANG", "C.UTF-8"),
+        "--setenv", "TERM", os.environ.get("TERM", "dumb"),
         "--setenv", "ZS_WORKSPACE_ROOT", "/tmp/workspace",
         "--",
     ]
@@ -264,8 +284,7 @@ def _sandboxed_argv(command: List[str], root: Path) -> List[str]:
 
 
 def _run_process(command: List[str], root: Path, timeout: int = 30) -> str:
-    original = list(command)
-    sandboxed = _sandboxed_argv(original, root)
+    sandboxed = _sandboxed_argv(list(command), root)
     result = subprocess.run(
         sandboxed,
         cwd=str(root),
@@ -277,37 +296,11 @@ def _run_process(command: List[str], root: Path, timeout: int = 30) -> str:
         timeout=timeout,
         check=False,
     )
-    # If bubblewrap itself fails to set up (permissions, user namespaces,
-    # missing helpers), retry the command unsandboxed instead of surfacing
-    # a sandbox setup error as a tool failure.
-    if sandboxed != original:
-        stderr = (result.stderr or "")
-        if (
-            result.returncode != 0
-            and (
-                "bwrap:" in stderr
-                or "Permission denied" in stderr
-                or "Operation not permitted" in stderr
-                or "setting up uid map" in stderr
-            )
-        ):
-            last = stderr.strip().splitlines()[-1] if stderr.strip() else "unknown"
-            sys.stderr.write(
-                "workspace_mcp: sandbox setup failed; retrying unsandboxed: "
-                + last
-                + "\n"
-            )
-            result = subprocess.run(
-                original,
-                cwd=str(root),
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                shell=False,
-                timeout=timeout,
-                check=False,
-            )
+    # No unsandboxed retry here, ever: bwrap has already passed its
+    # _bwrap_usable() probe by the time we get here, so a nonzero exit below
+    # is the command's own result (an attacker-controlled stderr can say
+    # "bwrap:" just as easily as a real setup failure can). Retrying outside
+    # the sandbox would execute a failed command with full host access.
     output = result.stdout.strip() or result.stderr.strip() or "(no output)"
     if result.returncode:
         raise RuntimeError(
@@ -656,8 +649,10 @@ def run_command(
     if not command.strip():
         raise ValueError("Command cannot be empty.")
     root = get_root()
-    extra_args = args or []
-    if not all(isinstance(arg, str) for arg in extra_args):
+    extra_args = [] if args is None else args
+    if not isinstance(extra_args, list) or not all(
+        isinstance(arg, str) for arg in extra_args
+    ):
         raise ValueError("args must be an array of strings.")
     binary = Path(command.strip()).name
     # Exact-binary deny (never prefix): "sudo" is blocked, "sudoku" is not an

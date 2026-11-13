@@ -6,9 +6,50 @@ set -u
 # script directory. This becomes the scoped workspace root for the MCP
 # server so commands run where the user launched Start_Linux.
 ZS_TERMINAL_WORKDIR="${PWD}"
-export ZS_WORKSPACE_ROOT="${ZS_WORKSPACE_ROOT:-$ZS_TERMINAL_WORKDIR}"
 
-cd "$(dirname "$0")" || exit 1
+# Optional first argument: project folder to use as the workspace root.
+# Accepts an absolute/relative path OR a bare project name, which is
+# resolved against ZS_PROJECTS_ROOT (or the folder containing this repo,
+# or the current directory). Lets you switch projects with just
+# `bash Linux_Start.sh CyClops`.
+if [ -n "${1:-}" ]; then
+    arg="$1"
+    if [ -d "$arg" ]; then
+        ZS_WORKSPACE_ROOT="$arg"
+    else
+        SCRIPT_DIR="$(cd -- "$(dirname "$0")" && pwd)"
+        BASES=("${ZS_PROJECTS_ROOT:-}" "$SCRIPT_DIR/.." "$ZS_TERMINAL_WORKDIR")
+        found=""
+        for base in "${BASES[@]}"; do
+            [ -z "$base" ] && continue
+            if [ -d "$base/$arg" ]; then found="$base/$arg"; break; fi
+        done
+        if [ -z "$found" ]; then
+            echo "  ERROR: project not found: $arg"
+            echo "  Looked in: ${BASES[*]}"
+            exit 1
+        fi
+        ZS_WORKSPACE_ROOT="$found"
+    fi
+    export ZS_WORKSPACE_ROOT
+else
+    export ZS_WORKSPACE_ROOT="${ZS_WORKSPACE_ROOT:-$ZS_TERMINAL_WORKDIR}"
+fi
+
+if [ ! -d "$ZS_WORKSPACE_ROOT" ]; then
+    echo "  ERROR: workspace root does not exist: $ZS_WORKSPACE_ROOT"
+    exit 1
+fi
+
+# Resolve to an absolute path so a relative arg survives the cd below.
+requested_root="$ZS_WORKSPACE_ROOT"
+if ! ZS_WORKSPACE_ROOT="$(cd -- "$requested_root" 2>/dev/null && pwd)"; then
+    echo "  ERROR: cannot enter workspace root: $requested_root"
+    exit 1
+fi
+export ZS_WORKSPACE_ROOT
+
+cd -- "$(dirname "$0")" || exit 1
 
 BRIDGE_PORT="${ZS_BRIDGE_PORT:-17613}"
 mkdir -p logs 2>/dev/null || true
