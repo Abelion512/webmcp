@@ -13,7 +13,17 @@ dist_v394/
 build_v394/
 bridge.exe.bak
 vscode_mcp.exe.old
+workspace_mcp.exe
 config.json.bak-*
+
+# Purged Windows/macOS artifacts (Linux fork)
+bridge.exe
+vscode_mcp.exe
+vscode_mcp.spec
+start.bat
+setup-config.ps1
+start-effectcraft.ps1
+MacOS_Start.command
 
 # Zip files
 *.zip

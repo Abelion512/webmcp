@@ -7,10 +7,9 @@ import logging
 import os
 import re
 import signal
-import socket
-import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -25,21 +24,51 @@ if getattr(sys, "frozen", False):
     ROOT = Path(sys.executable).resolve().parent
 else:
     ROOT = Path(__file__).resolve().parent
-CONFIG_PATH = ROOT / "config.json"
+CONFIG_PATH = Path(os.environ.get("ZS_BRIDGE_CONFIG", str(ROOT / "config.json")))
 LOG_PATH = ROOT / "logs" / "bridge_debug.log"
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("ZS_BRIDGE_PORT", "17613"))
 MCP_PROTOCOL_VERSION = "2024-11-05"
 BRIDGE_VERSION = "3.9.4"
 MAX_LOG_CHARS = 1000
+# Auto-recovery backoff for dead MCP subprocesses: 5s, 10s, 20s, ... capped.
+RESTART_BASE_DELAY_SECONDS = 5.0
+RESTART_MAX_DELAY_SECONDS = 300.0
 
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-logging.basicConfig(
-    filename=str(LOG_PATH),
-    level=logging.INFO,
-    format="%(asctime)s %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+
+
+class _JsonLogFormatter(logging.Formatter):
+    """One JSON object per line ({ts, level, message}) for log tail parsing.
+
+    Opt-in via ZS_BRIDGE_LOG_JSON=1; the default text format is kept so
+    existing `tail logs/bridge_debug.log` / grep workflows do not break.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:  # noqa: A003 - stdlib name
+        return _json_line(
+            {
+                "ts": datetime.fromtimestamp(record.created, timezone.utc).isoformat(),
+                "level": record.levelname,
+                "message": record.getMessage(),
+            }
+        )
+
+
+_log_format: Any = None
+if os.environ.get("ZS_BRIDGE_LOG_JSON", "").lower() in ("1", "true", "yes"):
+    _log_format = _JsonLogFormatter()
+_basic_config: Dict[str, Any] = {
+    "filename": str(LOG_PATH),
+    "level": logging.INFO,
+    "datefmt": "%Y-%m-%d %H:%M:%S",
+}
+if _log_format is None:
+    _basic_config["format"] = "%(asctime)s %(message)s"
+logging.basicConfig(**_basic_config)
+if _log_format is not None:
+    for _handler in logging.getLogger().handlers:
+        _handler.setFormatter(_log_format)
 
 
 def log(message: str) -> None:
@@ -65,6 +94,25 @@ class MCPServer:
         self._start_lock = asyncio.Lock()
         self.error: Optional[str] = None
         self.ready = False
+        # Auto-recovery state (see _monitor_servers): consecutive failed
+        # restarts and the monotonic time before the next attempt is due.
+        self.restart_attempts = 0
+        self.next_restart_at = 0.0
+
+    def restart_delay(self) -> float:
+        """Exponential backoff for the n-th consecutive failed restart."""
+        exponent = min(self.restart_attempts, 10)
+        return min(RESTART_BASE_DELAY_SECONDS * (2 ** exponent), RESTART_MAX_DELAY_SECONDS)
+
+    def record_restart_failure(self) -> float:
+        delay = self.restart_delay()
+        self.restart_attempts += 1
+        self.next_restart_at = time.monotonic() + delay
+        return delay
+
+    def record_restart_success(self) -> None:
+        self.restart_attempts = 0
+        self.next_restart_at = 0.0
 
     @property
     def alive(self) -> bool:
@@ -122,10 +170,10 @@ class MCPServer:
                         "capabilities": {},
                         "clientInfo": {"name": "snapgent-bridge", "version": BRIDGE_VERSION},
                     },
-                    timeout=12,
+                    timeout=30,
                 )
                 await self._notify("notifications/initialized")
-                result = await self._request("tools/list", {}, timeout=20)
+                result = await self._request("tools/list", {}, timeout=30)
                 raw_tools = result.get("tools", []) if isinstance(result, dict) else []
                 if not isinstance(raw_tools, list):
                     raise RuntimeError("MCP tools/list returned an invalid tool list.")
@@ -134,6 +182,7 @@ class MCPServer:
                     if isinstance(tool, dict) and isinstance(tool.get("name"), str)
                 ]
                 self.ready = True
+                self.record_restart_success()
                 log(f"[{self.server_id}] MCP server up ({len(self.tools)} tools advertised)")
                 return True
             except (asyncio.TimeoutError, RuntimeError, OSError, ValueError) as error:
@@ -284,7 +333,8 @@ class Bridge:
         self.clients = set()
         self._client_lock = asyncio.Lock()
         self._catalog: List[Dict[str, Any]] = []
-        self._last_studio: Optional[bool] = None
+        self.started_at = time.time()
+        self.started_monotonic = time.monotonic()
 
     def load_config(self) -> Dict[str, Dict[str, Any]]:
         if not CONFIG_PATH.exists():
@@ -351,14 +401,70 @@ class Bridge:
             )
 
     def _server_status(self) -> List[Dict[str, Any]]:
+        now = time.monotonic()
         return [
             {
                 "id": server.server_id,
                 "alive": server.alive,
+                "ready": server.ready,
                 "tools": len(server.tools) if server.alive else 0,
+                "pid": server.process.pid if server.process else None,
+                "error": server.error,
+                "restart_attempts": server.restart_attempts,
+                "next_restart_in_seconds": max(0.0, round(server.next_restart_at - now, 1))
+                if server.next_restart_at > now
+                else 0.0,
             }
             for server in self.servers.values()
         ]
+
+    @staticmethod
+    def _pid_rss_kib(pid: Optional[int]) -> Optional[int]:
+        """Resident set size in KiB from /proc (Linux); None elsewhere."""
+        if not pid:
+            return None
+        try:
+            status = Path(f"/proc/{pid}/status").read_text(encoding="utf-8")
+        except OSError:
+            return None
+        for line in status.splitlines():
+            if line.startswith("VmRSS:"):
+                try:
+                    return int(line.split()[1])
+                except (IndexError, ValueError):
+                    return None
+        return None
+
+    def _log_tail(self, lines: int = 30) -> List[str]:
+        try:
+            with LOG_PATH.open(encoding="utf-8", errors="replace") as handle:
+                tail = handle.readlines()[-lines:]
+        except OSError:
+            return []
+        return [line.rstrip("\n")[:MAX_LOG_CHARS] for line in tail]
+
+    def get_bridge_status(self, log_tail: Optional[List[str]] = None) -> Dict[str, Any]:
+        """Diagnostic snapshot: bridge, clients, subprocesses, RAM, log tail.
+
+        Served as the `get_bridge_status` bridge request (not a workspace
+        tool: the workspace subprocess cannot see bridge clients/PIDs).
+        """
+        now = time.monotonic()
+        servers = []
+        for entry in self._server_status():
+            pid = entry.get("pid")
+            servers.append({**entry, "rss_kib": self._pid_rss_kib(pid)})
+        return {
+            "bridge_version": BRIDGE_VERSION,
+            "host": HOST,
+            "port": PORT,
+            "uptime_seconds": round(now - self.started_monotonic, 1),
+            "started_at": datetime.fromtimestamp(self.started_at, timezone.utc).isoformat(),
+            "clients_connected": len(self.clients),
+            "servers": servers,
+            "tools_available": len(self._catalog),
+            "log_tail": log_tail if log_tail is not None else self._log_tail(),
+        }
 
     def _log_health(self) -> None:
         ids = ", ".join(self.servers) or "none"
@@ -389,8 +495,8 @@ class Bridge:
     async def _send_client(self, client: Any, message: Dict[str, Any]) -> None:
         try:
             await client.send(_json_line(message))
-        except Exception:
-            pass
+        except Exception as error:
+            log(f"bridge: failed to send to client: {error}")
 
     async def handle_client(self, websocket: Any, _path: Optional[str] = None) -> None:
         async with self._client_lock:
@@ -418,18 +524,6 @@ class Bridge:
         kind = request.get("type")
         if kind == "ping":
             await self._send_client(websocket, {"type": "pong", "id": request_id})
-        elif kind == "studio_status":
-            studio, studio_app, studio_proc = await self._studio_status()
-            await self._send_client(
-                websocket,
-                {
-                    "type": "studio_status",
-                    "id": request_id,
-                    "studio": studio,
-                    "studio_app": studio_app,
-                    "studio_proc": studio_proc,
-                },
-            )
         elif kind == "list_tools":
             await self._send_client(
                 websocket,
@@ -438,6 +532,13 @@ class Bridge:
                     "type": "tools",
                     "id": request_id,
                 },
+            )
+        elif kind == "get_bridge_status":
+            # Log file read is blocking I/O: run it off the event loop.
+            status = await asyncio.to_thread(self.get_bridge_status)
+            await self._send_client(
+                websocket,
+                {"type": "bridge_status", "id": request_id, "status": status},
             )
         elif kind == "call_tool":
             await self._call_tool(websocket, request)
@@ -483,6 +584,45 @@ class Bridge:
         except (TypeError, ValueError):
             timeout_seconds = 120.0
         server, tool_name = self._resolve_tool(name)
+        if server is None:
+            # One inline restart attempt before failing the call: a dead
+            # subprocess should not surface as "unknown tool" while the
+            # monitor is still backing off. Candidates: the server named in
+            # "server/<name>" prefix, the extension-selected server, or -
+            # for unqualified names - every configured server (usually one).
+            candidates: List[MCPServer] = []
+            if "/" in name:
+                prefixed = self.servers.get(name.split("/", 1)[0])
+                if prefixed is not None:
+                    candidates.append(prefixed)
+            allowed_hint = request.get("server")
+            if isinstance(allowed_hint, str) and allowed_hint in self.servers:
+                hinted = self.servers[allowed_hint]
+                if hinted not in candidates:
+                    candidates.append(hinted)
+            if not candidates:
+                candidates = list(self.servers.values())
+            # A server can be alive but still starting (process spawned,
+            # initialize/tools-list in flight, tools empty). Wait briefly
+            # for it to become ready instead of failing as unknown_tool.
+            for _ in range(10):
+                starting = [
+                    c for c in candidates if c.alive and not c.ready
+                ]
+                if not starting:
+                    break
+                await asyncio.sleep(0.5)
+                server, tool_name = self._resolve_tool(name)
+                if server is not None:
+                    break
+            for candidate in candidates:
+                if candidate.alive:
+                    continue
+                log(f"[{candidate.server_id}] restarting before tool call {name}.")
+                if await candidate.start():
+                    server, tool_name = self._resolve_tool(name)
+                    if server is not None:
+                        break
         # Isolation: the extension states which server is selected. The bridge refuses to
         # run a tool that belongs to any other server (requests without the field keep
         # the old behaviour).
@@ -578,30 +718,6 @@ class Bridge:
             return matches[0][0], name
         return None, name
 
-    async def _studio_status(self) -> Tuple[Optional[bool], Optional[bool], Optional[bool]]:
-        studio_server = self.servers.get("roblox")
-        studio_proc = _process_running("RobloxStudioBeta.exe" if os.name == "nt" else "RobloxStudio")
-        if not studio_server or not studio_server.alive:
-            return None, None, studio_proc
-        if not any(tool["name"] == "get_studio_state" for tool in studio_server.tools):
-            return None, None, studio_proc
-        try:
-            result = await studio_server.call_tool("get_studio_state", {}, 8)
-        except (asyncio.TimeoutError, RuntimeError, OSError, ValueError):
-            return False, studio_proc, studio_proc
-        text = " ".join(
-            item.get("text", "")
-            for item in result.get("content", [])
-            if isinstance(item, dict) and isinstance(item.get("text"), str)
-        )
-        if result.get("isError") or re.search(
-            r"Unable to find an active Studio instance|previously active Studio has disconnected",
-            text,
-            re.IGNORECASE,
-        ):
-            return False, studio_proc, studio_proc
-        return True, True, studio_proc
-
     async def _change_server(
         self, websocket: Any, request: Dict[str, Any], remove: bool
     ) -> None:
@@ -609,7 +725,6 @@ class Bridge:
         server_id = request.get("server_id")
         if (
             not isinstance(server_id, str)
-            or server_id == "roblox"
             or not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", server_id)
         ):
             await self._send_client(
@@ -623,8 +738,6 @@ class Bridge:
             if not isinstance(servers, dict):
                 raise RuntimeError("mcpServers must be a JSON object.")
             if remove:
-                if server_id == "vscode":
-                    raise RuntimeError("The VS Code MCP server cannot be removed.")
                 servers.pop(server_id, None)
             else:
                 command = request.get("command")
@@ -644,7 +757,7 @@ class Bridge:
             await self.start_servers()
             await self._send_client(
                 websocket,
-                {"type": "server_changed", "id": request_id, "ok": True, "restarting": False},
+                {"type": "server_changed", "id": request_id, "ok": True, "restarting": True},
             )
             await self.broadcast(self._connected_message())
         except (OSError, json.JSONDecodeError, RuntimeError) as error:
@@ -652,33 +765,6 @@ class Bridge:
                 websocket,
                 {"type": "server_changed", "id": request_id, "ok": False, "error": str(error)},
             )
-
-
-def _process_running(process_name: str) -> Optional[bool]:
-    try:
-        if os.name == "nt":
-            result = subprocess_run(
-                ["tasklist", "/FI", f"IMAGENAME eq {process_name}", "/NH"],
-                timeout=5,
-            )
-            return process_name.lower() in result.lower()
-        result = subprocess_run(["pgrep", "-f", process_name], timeout=5)
-        return bool(result.strip())
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-
-
-def subprocess_run(command: List[str], timeout: int) -> str:
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=timeout,
-        check=False,
-    )
-    return result.stdout
 
 
 async def run() -> None:
@@ -731,10 +817,24 @@ async def _monitor_servers(bridge: Bridge) -> None:
         await asyncio.sleep(5)
         changed = False
         for server in bridge.servers.values():
-            if not server.alive:
-                log(f"[{server.server_id}] MCP server disconnected; restarting.")
-                await server.start()
+            if server.alive:
+                continue
+            if server.next_restart_at > time.monotonic():
+                continue  # backing off after consecutive failures
+            log(f"[{server.server_id}] MCP server disconnected; restarting.")
+            try:
+                restarted = await server.start()
+            except Exception as error:  # keep the monitor alive
+                restarted = False
+                server.error = str(error)
+            if restarted:
                 changed = True
+            else:
+                delay = server.record_restart_failure()
+                log(
+                    f"[{server.server_id}] restart failed; retrying in {delay:.0f}s "
+                    f"(attempt {server.restart_attempts})."
+                )
         if changed:
             bridge._rebuild_catalog()
             bridge._log_health()

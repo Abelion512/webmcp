@@ -1,0 +1,54 @@
+# Path rules for .github/workflows/labeler.yml. The key is the label to apply;
+# every changed file is matched against the globs below.
+# Labels not listed here (bug, enhancement, question, ...) stay manual.
+
+bridge:
+  - changed-files:
+      - any-glob-to-any-file:
+          - bridge.py
+          - bridge_auth.py
+          - workspace_mcp.py
+          - requirements.txt
+          - vscode_mcp.py
+          - Linux_Start.sh
+          - MacOS_Start.command
+          - start.bat
+          - start-*.ps1
+          - setup-config.py
+          - setup-config.ps1
+          - "*.spec"
+
+extension:
+  - changed-files:
+      - any-glob-to-any-file: snapgent-extension/**
+
+documentation:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "*.md"
+          - docs/**
+          - LICENSE
+
+security:
+  # the handshake itself: origin allowlist, token check, token file, revocation
+  # plus workspace containment (path resolution, run_command policy)
+  - changed-files:
+      - any-glob-to-any-file:
+          - bridge_auth.py
+          - bridge.py
+          - workspace_mcp.py
+
+ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - .github/**
+          - pyproject.toml
+          - .editorconfig
+          - "*.spec"
+
+tests:
+  - changed-files:
+      - any-glob-to-any-file:
+          - test_*.py
+          - scripts/e2e_live.py
+          - snapgent-extension/test-*.js

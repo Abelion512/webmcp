@@ -9,6 +9,45 @@ const DEFAULT_AI_URL = "https://chatgpt.com/";
 
 
 
+function fmtUptime(seconds) {
+  if (typeof seconds !== "number" || seconds < 0) return "";
+  if (seconds < 60) return `${Math.floor(seconds)}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  return `${Math.floor(seconds / 3600)}h${Math.floor((seconds % 3600) / 60)}m`;
+}
+
+function fmtRss(kib) {
+  if (typeof kib !== "number" || kib < 0) return "";
+  return kib >= 1024 * 1024
+    ? `${(kib / 1024 / 1024).toFixed(1)} GB`
+    : `${(kib / 1024).toFixed(1)} MB`;
+}
+
+// One line per server from the bridge diagnostic snapshot. Falls back to
+// the plain servers list when the bridge is old (no bridgeStatus).
+// textContent only - bridge error strings are never injected as HTML.
+function serverLines(s, list) {
+  const diag = s.bridgeStatus;
+  if (diag && Array.isArray(diag.servers) && diag.servers.length) {
+    return diag.servers.map((x) => {
+      const parts = [x.alive ? "●" : "○", x.id];
+      if (x.pid) parts.push(`pid ${x.pid}`);
+      parts.push(x.alive ? `${x.tools} tools` : "down");
+      const rss = fmtRss(x.rss_kib);
+      if (rss && x.alive) parts.push(rss);
+      if (x.restart_attempts > 0) {
+        parts.push(x.next_restart_in_seconds > 0
+          ? `retry ${x.restart_attempts} in ${Math.round(x.next_restart_in_seconds)}s`
+          : `retries ${x.restart_attempts}`);
+      }
+      let line = parts.join(" · ");
+      if (!x.alive && x.error) line += ` — ${String(x.error).slice(0, 60)}`;
+      return line;
+    });
+  }
+  return list.map((x) => `${x.alive ? "●" : "○"} ${x.id} (${x.alive ? x.tools + " tools" : "down"})`);
+}
+
 function render(s) {
   const state = document.getElementById("state");
   const tools = document.getElementById("tools");
@@ -30,10 +69,13 @@ function render(s) {
   ver.textContent = !s.connected ? `ext v${extVer}`
     : s.bridgeVersion ? `ext v${extVer} · bridge v${s.bridgeVersion}`
     : `ext v${extVer} · bridge old`;
-  tools.textContent = s.connected ? `${s.tools || 0} tools` : "Run start.bat";
-  servers.textContent = s.connected
-    ? list.map((x) => `${x.alive ? "●" : "○"} ${x.id} (${x.alive ? x.tools + " tools" : "down"})`).join("\n")
-    : "";
+  tools.textContent = s.connected
+    ? `${s.tools || 0} tools`
+      + (s.bridgeStatus && s.bridgeStatus.uptime_seconds != null
+          ? ` · bridge up ${fmtUptime(s.bridgeStatus.uptime_seconds)}`
+          : "")
+    : "Run start.bat";
+  servers.textContent = s.connected ? serverLines(s, list).join("\n") : "";
 }
 
 function refresh() {
