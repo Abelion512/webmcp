@@ -2,16 +2,48 @@
 """Cross-platform local WebSocket bridge for Snapgent MCP servers."""
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import os
 import re
+import secrets
 import signal
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+# Handshake policy (Origin allowlist, per-install token, token file handling)
+# lives in bridge_auth.py; the names are re-exported here because bridge.py is the
+# entry point and the tests configure auth through this module.
+from bridge_auth import (
+    ALLOWED_ORIGIN_PREFIXES,
+    AUTH_DISABLE_ENV,
+    AUTH_DISABLED_VALUES,
+    TOKEN_ENV,
+    TOKEN_PATH_ENV,
+    auth_disabled,
+    header_value,
+    load_auth_token,
+    origin_allowed,
+    presented_token,
+    token_matches,
+    token_path,
+    write_token_file,
+)
+
+# The four below are only re-exported: Linux_Start.sh --check and the tests reach
+# the auth policy through this module. Listing them keeps pyflakes (a no-dead-code
+# check in CI) able to see that the imports are deliberate.
+__all__ = [
+    "ALLOWED_ORIGIN_PREFIXES",
+    "AUTH_DISABLED_VALUES",
+    "TOKEN_PATH_ENV",
+    "auth_disabled",
+]
 
 try:
     import websockets
@@ -34,6 +66,16 @@ MAX_LOG_CHARS = 1000
 # Auto-recovery backoff for dead MCP subprocesses: 5s, 10s, 20s, ... capped.
 RESTART_BASE_DELAY_SECONDS = 5.0
 RESTART_MAX_DELAY_SECONDS = 300.0
+
+# An unpaired extension retries every few seconds, so repeat rejections are only
+# reported once per interval to keep bridge_debug.log readable.
+REJECT_LOG_INTERVAL = 60.0
+# Rotation must end the sessions that were authenticated with the old token, so
+# every live client is closed once the new token has been sent. 1012 ("service
+# restart") is a reconnect signal, not a pairing problem, so the extension does
+# not flash its pairing card for it.
+ROTATE_CLOSE_CODE = 1012
+ROTATE_CLOSE_REASON = "bridge token rotated; reconnect with the new token"
 
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
@@ -328,13 +370,27 @@ class MCPServer:
 
 
 class Bridge:
-    def __init__(self) -> None:
+    def __init__(self, token: Optional[str] = None) -> None:
         self.servers: Dict[str, MCPServer] = {}
         self.clients = set()
         self._client_lock = asyncio.Lock()
         self._catalog: List[Dict[str, Any]] = []
+        self._last_studio: Optional[bool] = None
         self.started_at = time.time()
         self.started_monotonic = time.monotonic()
+        self.token = token
+        self._reject_log: Dict[str, Tuple[float, int]] = {}
+        self._rotate_lock = asyncio.Lock()
+        # A2A delegation: one browser tab, one generation.
+        self._pending_prompts: Dict[str, asyncio.Future] = {}
+        self._prompt_lock = asyncio.Lock()
+        # The socket a pending prompt belongs to. Only that socket may resolve it:
+        # a reply is trusted only from the socket the prompt was delivered to.
+        # `self.clients` membership requires the bridge token handshake (see
+        # handle_client), so prompt delivery is restricted to authenticated
+        # extension sockets.
+        self._prompt_owner: Any = None
+        self._last_client: Any = None
 
     def load_config(self) -> Dict[str, Dict[str, Any]]:
         if not CONFIG_PATH.exists():
@@ -508,15 +564,174 @@ class Bridge:
             return_exceptions=True,
         )
 
-    async def _send_client(self, client: Any, message: Dict[str, Any]) -> None:
+    async def _send_client(self, client: Any, message: Dict[str, Any]) -> bool:
+        """Send and report delivery so callers can fail fast.
+
+        A dropped socket used to be swallowed here: a prompt sent to an owner
+        that had just disconnected would silently never arrive and the A2A
+        caller would wait out the whole timeout.
+        """
         try:
             await client.send(_json_line(message))
         except Exception as error:
             log(f"bridge: failed to send to client: {error}")
+            return False
+        return True
+
+    async def revoke_clients(self) -> int:
+        """Close every authenticated connection so each one must re-handshake.
+
+        Used after a token rotation: a session that was authenticated with the
+        old secret must not stay open. 1012 ("service restart") tells the
+        extension this is a reconnect, not a pairing problem, so it keeps the
+        token it just saved and dials in again.
+        """
+        async with self._client_lock:
+            clients = list(self.clients)
+        if clients:
+            await asyncio.gather(
+                *(self._close_client(client) for client in clients),
+                return_exceptions=True,
+            )
+        return len(clients)
+
+    async def _close_client(self, client: Any) -> None:
+        try:
+            await client.close(code=ROTATE_CLOSE_CODE, reason=ROTATE_CLOSE_REASON)
+        except Exception:
+            pass
+
+    def _log_rejection(self, key: str, message: str) -> None:
+        """Log the first rejection, then at most one summary per interval."""
+        now = time.monotonic()
+        last, suppressed = self._reject_log.get(key, (0.0, 0))
+        if last and now - last < REJECT_LOG_INTERVAL:
+            self._reject_log[key] = (last, suppressed + 1)
+        else:
+            if suppressed:
+                message = f"{message} ({suppressed} more since the last report)"
+            log(message)
+            self._reject_log[key] = (now, 0)
+        # `key` can embed unauthenticated client data (e.g. a fresh Origin
+        # header per handshake from a hostile page); cap the map so it cannot
+        # grow without bound. Oldest entry first out.
+        if len(self._reject_log) > 64:
+            for stale in sorted(self._reject_log, key=self._reject_log.get)[: len(self._reject_log) - 64]:  # type: ignore[arg-type,union-attr]
+                self._reject_log.pop(stale, None)
+
+    def rotate_token(self, request_id: Any = None) -> Dict[str, Any]:
+        """Issue and persist a fresh token; the caller revokes the live sessions.
+
+        Rotation changes the value future handshakes must present. Once the reply
+        is on the wire, `_handle_request` closes every authenticated connection, so
+        no session outlives the old secret; the extension stores the new token and
+        reconnects with it by itself.
+        """
+        response: Dict[str, Any] = {"type": "token_rotated", "id": request_id}
+        if self.token is None:
+            return {**response, "ok": False, "error": f"token auth is disabled ({AUTH_DISABLE_ENV})"}
+        if (os.environ.get(TOKEN_ENV) or "").strip():
+            return {
+                **response,
+                "ok": False,
+                "error": f"the token is pinned by {TOKEN_ENV}; change that variable instead",
+            }
+        token = secrets.token_urlsafe(32)
+        path = token_path()
+        try:
+            write_token_file(path, token)
+        except OSError as error:
+            log(f"could not rotate the bridge token ({error})")
+            return {**response, "ok": False, "error": f"could not write {path}: {error}"}
+        self.token = token
+        log(f"bridge token rotated; the new token is saved to {path}")
+        return {**response, "ok": True, "token": token}
+
+    async def _reject_handshake(self, websocket: Any, reason: str) -> None:
+        try:
+            await websocket.close(code=1008, reason=reason)
+        except Exception:
+            return False
+        return True
+
+    def _fail_pending_prompts(self, reason: str) -> None:
+        for future in list(self._pending_prompts.values()):
+            if not future.done():
+                future.set_result({"ok": False, "error": reason})
+        self._pending_prompts.clear()
+        self._prompt_owner = None
+
+    async def submit_prompt(self, prompt: str, timeout: float) -> Dict[str, Any]:
+        """Delegate one prompt to the browser extension. Single-flight.
+
+        The deadline covers the queue wait too: a second task that waits for the
+        lock must not start a generation the caller has already given up on.
+        """
+        if not isinstance(prompt, str) or not prompt.strip():
+            return {"ok": False, "error": "Empty prompt."}
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        timed_out = {"ok": False, "error": f"The web AI did not answer within {int(timeout)}s."}
+        async with self._prompt_lock:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return timed_out
+            async with self._client_lock:
+                if self._last_client in self.clients:
+                    client = self._last_client
+                else:
+                    client = next(iter(self.clients), None)
+                if client is None:
+                    return {"ok": False, "error": "No Snapgent extension is connected."}
+            prompt_id = f"p{uuid.uuid4().hex}"
+            future: asyncio.Future = loop.create_future()
+            self._pending_prompts[prompt_id] = future
+            self._prompt_owner = client
+            try:
+                sent = await self._send_client(client, {"type": "submit_prompt", "id": prompt_id, "prompt": prompt})
+                if not sent:
+                    return {"ok": False, "error": "The Snapgent extension disconnected before the prompt could be delivered."}
+                return await asyncio.wait_for(future, remaining)
+            except asyncio.TimeoutError:
+                return timed_out
+            finally:
+                self._pending_prompts.pop(prompt_id, None)
+                if self._prompt_owner is client:
+                    self._prompt_owner = None
+
+    async def _resolve_prompt(self, websocket: Any, request: Dict[str, Any]) -> None:
+        prompt_id = request.get("prompt_id")
+        # Only the socket the prompt was sent to may resolve it.
+        if websocket is not self._prompt_owner:
+            await self._send_client(websocket, {"type": "prompt_ack", "id": request.get("id")})
+            return
+        future = self._pending_prompts.pop(prompt_id, None) if isinstance(prompt_id, str) else None
+        if future is not None and not future.done():
+            if request.get("ok"):
+                future.set_result({"ok": True, "text": str(request.get("text") or "")})
+            else:
+                future.set_result({"ok": False, "error": str(request.get("error") or "The web AI failed.")})
+        await self._send_client(websocket, {"type": "prompt_ack", "id": request.get("id")})
 
     async def handle_client(self, websocket: Any, _path: Optional[str] = None) -> None:
+        origin = header_value(websocket, "Origin")
+        if not origin_allowed(origin):
+            self._log_rejection(
+                f"origin:{origin}", f"rejected client from origin {origin!r}"
+            )
+            await self._reject_handshake(websocket, "origin not allowed")
+            return
+        if self.token:
+            presented = presented_token(websocket)
+            if not presented or not token_matches(presented, self.token):
+                self._log_rejection(
+                    "token", "rejected client with a missing or invalid bridge token"
+                )
+                await self._reject_handshake(websocket, "bridge token required")
+                return
         async with self._client_lock:
             self.clients.add(websocket)
+            self._last_client = websocket
         log("extension connected")
         await self._send_client(websocket, self._connected_message())
         try:
@@ -533,6 +748,12 @@ class Bridge:
         finally:
             async with self._client_lock:
                 self.clients.discard(websocket)
+                remaining = bool(self.clients)
+            # Fail prompts owned by the departing socket even when other
+            # clients remain: otherwise the caller waits the full timeout on
+            # an owner that will never answer.
+            if not remaining or self._prompt_owner is websocket:
+                self._fail_pending_prompts("The extension disconnected.")
             log("extension disconnected")
 
     async def _handle_request(self, websocket: Any, request: Dict[str, Any]) -> None:
@@ -578,10 +799,25 @@ class Bridge:
                 response = {"type": "mcp_status", "id": request_id, "ok": False, "alive": False, "error": str(error)}
             await self._send_client(websocket, response)
             await self.broadcast(self._connected_message())
+        elif kind == "rotate_token":
+            # One rotation at a time: two overlapping rotations would each
+            # write a token and close sockets mid-flight, locking out the
+            # client that saved the first one.
+            async with self._rotate_lock:
+                response = self.rotate_token(request_id)
+                # Send the new token first: the client needs it before its socket
+                # goes away, and the extension saves it as soon as the reply
+                # arrives.
+                await self._send_client(websocket, response)
+                if response.get("ok"):
+                    revoked = await self.revoke_clients()
+                    log(f"revoked {revoked} authenticated connection(s) after the token rotation")
         elif kind == "add_server":
             await self._change_server(websocket, request, remove=False)
         elif kind == "remove_server":
             await self._change_server(websocket, request, remove=True)
+        elif kind == "prompt_result":
+            await self._resolve_prompt(websocket, request)
         else:
             await self._send_client(
                 websocket,
@@ -638,11 +874,23 @@ class Bridge:
             for candidate in candidates:
                 if candidate.alive:
                     continue
+                # Respect the monitor's backoff here too: a crash-looping
+                # server must not get a fresh spawn attempt on every tool
+                # call, and failures must feed the backoff schedule.
+                if candidate.next_restart_at > time.monotonic():
+                    continue
                 log(f"[{candidate.server_id}] restarting before tool call {name}.")
                 if await candidate.start():
+                    candidate.next_restart_at = 0.0
                     server, tool_name = self._resolve_tool(name)
                     if server is not None:
                         break
+                else:
+                    delay = candidate.record_restart_failure()
+                    log(
+                        f"[{candidate.server_id}] restart failed; "
+                        f"backing off {delay:.0f}s before the next attempt."
+                    )
         # Isolation: the extension states which server is selected. The bridge refuses to
         # run a tool that belongs to any other server (requests without the field keep
         # the old behaviour).
@@ -791,19 +1039,53 @@ class Bridge:
             )
 
 
+def build_a2a_server(bridge: "Bridge", loop: asyncio.AbstractEventLoop) -> Any:
+    """Return an A2A HTTP facade whose submit() runs bridge.submit_prompt."""
+    import a2a_server
+
+    try:
+        port = int(os.environ.get("ZS_A2A_PORT", str(a2a_server.DEFAULT_PORT)))
+    except ValueError:
+        port = a2a_server.DEFAULT_PORT
+    if not 0 <= port <= 65535:
+        port = a2a_server.DEFAULT_PORT
+    try:
+        timeout_ms = int(os.environ.get("ZS_A2A_TIMEOUT_MS", str(a2a_server.DEFAULT_TIMEOUT_MS)))
+    except ValueError:
+        timeout_ms = a2a_server.DEFAULT_TIMEOUT_MS
+    token = os.environ.get("ZS_A2A_TOKEN") or secrets.token_urlsafe(32)
+
+    def submit(prompt: str, task_timeout: float) -> Dict[str, Any]:
+        future = asyncio.run_coroutine_threadsafe(bridge.submit_prompt(prompt, task_timeout), loop)
+        try:
+            return future.result(task_timeout + 60)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            return {"ok": False, "error": "Timed out waiting for the browser bridge."}
+
+    server = a2a_server.A2AServer(
+        submit,
+        host=HOST,
+        port=port,
+        token=token,
+        base_url=f"http://{HOST}:{port}",
+        timeout_ms=timeout_ms,
+    )
+    return server
+
+
 async def run() -> None:
     if websockets is None:
         raise RuntimeError(
             "The 'websockets' package is required. Install it with "
             f"'{sys.executable} -m pip install websockets'."
         )
-    bridge = Bridge()
-    # Defend against Cross-Site WebSocket Hijacking: only the extension (and
-    # non-browser/local clients that send no Origin) may connect. A web page
-    # cannot spoof the Origin header, so this blocks drive-by RCE via the
-    # local bridge. Any extension ID is accepted (unpacked installs derive a
-    # different ID per machine); cross-origin WS access by a hostile extension
-    # is finally gated by the bridge token handshake, not by this list.
+    token, created = load_auth_token(log)
+    bridge = Bridge(token)
+    # Defense in depth above the token handshake: reject non-extension browser
+    # origins at the WebSocket handshake itself. Any extension ID is accepted
+    # (unpacked installs derive a different ID per machine); a hostile
+    # extension is gated by the bridge token, not by this list.
     allowed_origins = [None, re.compile(r"chrome-extension://.*"), re.compile(r"moz-extension://.*")]
     server = await websockets.serve(
         bridge.handle_client,
@@ -816,7 +1098,37 @@ async def run() -> None:
     )
     log(f"snapgent bridge v{BRIDGE_VERSION}")
     log(f"listening on ws://{HOST}:{PORT} - load the extension and open a supported AI chat")
+    if token:
+        if (os.environ.get(TOKEN_ENV) or "").strip():
+            log(f"auth: token required ({TOKEN_ENV}); origin allowlist enforced")
+        else:
+            log(f"auth: token required from {token_path()}; origin allowlist enforced")
+        if created:
+            # The token itself never goes into the log: bridge_debug.log is a
+            # world-readable file next to the workspace, and get_bridge_status
+            # tails it back to every paired client. The popup pairing flow
+            # reads the token from the token file, not from this message.
+            log("first run: paste this token into the Snapgent popup once (it is saved by the extension)")
+            log(f"bridge token saved to {token_path()}")
+    else:
+        log(
+            "WARNING: bridge token auth is disabled - any local process can call MCP tools. "
+            f"Unset {AUTH_DISABLE_ENV} and restart the bridge to require a token."
+        )
     loop = asyncio.get_running_loop()
+    a2a = None
+    if os.environ.get("ZS_A2A_DISABLE") != "1":
+        try:
+            a2a = build_a2a_server(bridge, loop)
+            a2a.start()
+            log(f"A2A agent card: http://{HOST}:{a2a.port}/.well-known/agent-card.json")
+            # Token goes to the terminal only, never to the log file: the file is
+            # world-readable by default and this token gates an RPC that can write
+            # workspace files.
+            print(f"A2A bearer token: {a2a.token} (set ZS_A2A_TOKEN to pin it)", flush=True)
+        except OSError as error:
+            log(f"A2A server disabled: {error}")
+            a2a = None
     stop_event = asyncio.Event()
     async def _startup_then_monitor() -> None:
         # Servers start in parallel after the websocket is already listening;
@@ -838,6 +1150,8 @@ async def run() -> None:
     finally:
         monitor_task.cancel()
         await asyncio.gather(monitor_task, return_exceptions=True)
+        if a2a is not None:
+            a2a.stop()
         server.close()
         await server.wait_closed()
         await bridge.stop_servers()

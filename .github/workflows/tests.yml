@@ -35,7 +35,7 @@ jobs:
       - name: Install test deps
         run: python -m pip install pytest websockets pyflakes
       - name: Python static check (unused imports/names)
-        run: python -m pyflakes workspace_mcp.py bridge.py test_*.py scripts/e2e_live.py setup-config.py
+        run: python -m pyflakes workspace_mcp.py bridge.py bridge_auth.py test_*.py scripts/e2e_live.py scripts/smoke_extension_live.py setup-config.py
       - name: Python tests
         run: python -m pytest -q
       - uses: actions/setup-node@v4
@@ -43,12 +43,16 @@ jobs:
           node-version: "20"
       - name: Extension stub-DOM tests
         run: |
-          node --check snapgent-extension/background.js
-          node --check snapgent-extension/popup.js
+          for file in snapgent-extension/background.js \
+                      snapgent-extension/popup.js \
+                      snapgent-extension/core/*.js; do
+            node --check "$file"
+          done
           node snapgent-extension/test-parser.js
           node snapgent-extension/test-chatgpt.js
           node snapgent-extension/test-meta.js
           node snapgent-extension/test-popup-status.js
+          node snapgent-extension/test-pairing.js
 
   e2e:
     runs-on: ubuntu-latest

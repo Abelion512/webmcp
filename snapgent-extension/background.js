@@ -7,8 +7,15 @@
 // Contract with content.js: every sendMessage ALWAYS gets a response object,
 // even when the bridge is offline. The agentic loop must never hang waiting.
 
+// Classic service worker (no "type": "module"), so shared code is pulled in with
+// importScripts. core/pairing.js builds the handshake URL and classifies closes.
+importScripts("core/pairing.js");
+
 const PORT = 17613;
 const URL = `ws://127.0.0.1:${PORT}`;
+// Pairing secret issued by the bridge (~/.snapgent/bridge_token). The popup saves
+// it here; the bridge rejects connections without it once auth is enabled.
+const TOKEN_KEY = "bridgeToken";
 
 // Chat sites where a snapgentV3 provider content script runs. Status pushes go
 // to every tab matching these. Add the new provider's URL pattern here (and in
@@ -26,6 +33,10 @@ const REQUEST_TIMEOUT_DEFAULT = 130000; // a bit above the 120s tool timeout
 
 let ws = null;
 let connected = false;
+let authRequired = false; // bridge closed us with 1008: token missing or wrong
+let rotatingToken = false; // bridge closed us with 1012: token changed, reconnecting
+let bridgeToken = null; // cached chrome.storage value; null = not read yet
+let connecting = false;
 let reconnectDelay = RECONNECT_MIN;
 let reconnectTimer = null;
 let heartbeatTimer = null;
@@ -62,21 +73,46 @@ function log(...a) {
 }
 
 // ── WebSocket lifecycle ─────────────────────────────────────────────────
-function connect() {
+function readBridgeToken() {
+  // Never leave connect() awaiting this: it holds the `connecting` guard, and a
+  // callback that never fires (invalidated extension context) would then block
+  // every future reconnect for the life of the worker. Fall back to "no token".
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(""), 2000);
+    const done = (value) => { clearTimeout(timer); resolve(value || ""); };
+    try {
+      chrome.storage.local.get(TOKEN_KEY, (values) => {
+        done(values && values[TOKEN_KEY]);
+      });
+    } catch {
+      done("");
+    }
+  });
+}
+
+async function connect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
     return;
   }
+  if (connecting) return;
+  connecting = true;
   clearTimeout(reconnectTimer);
   try {
-    ws = new WebSocket(URL);
+    if (bridgeToken === null) bridgeToken = await readBridgeToken();
+    const url = ZSPairing.bridgeUrl(URL, bridgeToken);
+    ws = new WebSocket(url);
   } catch (e) {
     log("WebSocket ctor failed", e);
     scheduleReconnect();
     return;
+  } finally {
+    connecting = false;
   }
 
   ws.onopen = () => {
     connected = true;
+    authRequired = false;
+    rotatingToken = false;
     reconnectDelay = RECONNECT_MIN;
     lastMessageAt = Date.now();
     log("connected to bridge");
@@ -96,8 +132,10 @@ function connect() {
     handleBridgeMessage(msg);
   };
 
-  ws.onclose = () => {
+  ws.onclose = (ev) => {
     connected = false;
+    authRequired = ZSPairing.isAuthClose(ev);
+    rotatingToken = ZSPairing.isRotationClose(ev);
     mcpAlive = false;
     studioConnected = null;
     studioApp = null;
@@ -271,6 +309,16 @@ function handleBridgeMessage(msg) {
     broadcastStatus();
     return;
   }
+  if (msg.type === "submit_prompt") {
+    handleSubmitPrompt(msg);
+    return;
+  }
+  if (msg.type === "prompt_ack") {
+    // Ack of OUR prompt_result send: clear its pending entry now instead of
+    // waiting out the 15s request timeout.
+    resolvePending(msg.id, { ok: true });
+    return;
+  }
   if (msg.type === "connected") {
     bridgeVersion = typeof msg.bridge_version === "string" ? msg.bridge_version : null;
     mcpAlive = !!msg.mcp_alive;
@@ -311,6 +359,14 @@ function handleBridgeMessage(msg) {
     broadcastStatus();
     return;
   }
+  if (msg.type === "token_rotated") {
+    // The bridge answers with the new secret and only then drops the socket
+    // (1012). Resolving here - before onclose can fail every pending request -
+    // is what lets the worker store the token and reconnect with it instead of
+    // retrying the old one into a 1008.
+    resolvePending(msg.id, { ok: !!msg.ok, token: msg.token, error: msg.error });
+    return;
+  }
   if (msg.type === "server_changed") {
     // The bridge acks, then restarts itself to reload config.json. The socket
     // will drop right after this - the content script shows a spinner until the
@@ -321,6 +377,42 @@ function handleBridgeMessage(msg) {
   if (msg.type === "error") {
     resolvePending(msg.id, { ok: false, error: msg.error });
     return;
+  }
+}
+
+// Relay a bridge prompt to the active provider tab. Fire-and-forget: the
+// content script answers later via an "a2a_result" runtime message. An MV3
+// worker eviction between the two hops is expected and handled by reconnect.
+async function handleSubmitPrompt(msg) {
+  const promptId = msg.id;
+  const reply = (payload) =>
+    send({ type: "prompt_result", prompt_id: promptId, ok: !!payload.ok,
+           text: payload.text || "", error: payload.error || "" }, 15000);
+  try {
+    let tabs = await chrome.tabs.query({ url: PROVIDER_URLS, active: true, lastFocusedWindow: true });
+    if (!tabs.length) tabs = await chrome.tabs.query({ url: PROVIDER_URLS });
+    const tab = tabs.find((t) => t.active) || tabs[0];
+    if (!tab) { await reply({ ok: false, error: "No AI chat tab is open." }); return; }
+    try {
+      // Callback form, never awaited: the content script answers LATER via an
+      // "a2a_result" runtime message, so the channel closing is expected — not a
+      // failure. Only "no receiver" is a real error, and it must not race the
+      // content script's own reply.
+      chrome.tabs.sendMessage(
+        tab.id,
+        { type: "zs-a2a-prompt", prompt: msg.prompt, promptId },
+        () => {
+          const err = chrome.runtime.lastError;
+          if (err && /Receiving end|Could not establish/i.test(err.message || "")) {
+            reply({ ok: false, error: "No Snapgent content script in the AI chat tab. Reload it." });
+          }
+        }
+      );
+    } catch (e) {
+      reply({ ok: false, error: "The AI chat tab did not accept the prompt." });
+    }
+  } catch (e) {
+    await reply({ ok: false, error: String((e && e.message) || e) });
   }
 }
 
@@ -342,7 +434,7 @@ function failAllPending(reason) {
 
 // ── status push to any open DeepSeek tab + popup ─────────────────────────
 function statusObj() {
-  return { type: "zs-status", connected, mcpAlive, bridgeVersion, bridgeStatus: bridgeStatusCache, studio: studioConnected, studioApp, studioProc, tools: toolsCache.length, servers: serversCache };
+  return { type: "zs-status", connected, authRequired, rotatingToken, savedToken: !!bridgeToken, mcpAlive, bridgeVersion, bridgeStatus: bridgeStatusCache, studio: studioConnected, studioApp, studioProc, tools: toolsCache.length, servers: serversCache };
 }
 
 function broadcastStatus() {
@@ -359,11 +451,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       case "status":
         if (!connected) connect(); // self-heal after a worker wake-up
         else refreshBridgeStatus(); // stale-guarded (5 s), fire-and-forget
+        if (bridgeToken === null) bridgeToken = await readBridgeToken();
         sendResponse(statusObj());
         break;
       case "bridge_status":
         await refreshBridgeStatus(true);
-        sendResponse(statusObj());
         break;
       case "list_tools": {
         // Prefer a live refresh; fall back to cache so the loop never stalls.
@@ -385,6 +477,21 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         sendResponse(r);
         break;
       }
+      case "rotate_token": {
+        // The bridge replies with the new token and then closes every authenticated
+        // socket (1012), so it must be saved here before onclose fires: the
+        // reconnect then dials in with the new value instead of asking to pair.
+        const r = await send({ type: "rotate_token" }, 15000);
+        if (r.ok && r.token) {
+          bridgeToken = r.token;
+          await new Promise((resolve) =>
+            chrome.storage.local.set({ [TOKEN_KEY]: r.token }, resolve)
+          );
+          broadcastStatus();
+        }
+        sendResponse(r);
+        break;
+      }
       case "restart_mcp": {
         const r = await send({ type: "restart_mcp" }, 30000);
         sendResponse(r);
@@ -403,8 +510,15 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         sendResponse(r);
         break;
       }
+      case "a2a_result": {
+        await send({ type: "prompt_result", prompt_id: msg.promptId,
+                     ok: !!msg.ok, text: msg.text || "", error: msg.error || "" }, 15000);
+        sendResponse({ ok: true });
+        break;
+      }
       case "reconnect":
         reconnectDelay = RECONNECT_MIN;
+        bridgeToken = null; // re-read: the popup may have just saved a token
         connect();
         sendResponse({ ok: true });
         break;

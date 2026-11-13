@@ -122,6 +122,23 @@
     }
     #servers:empty { display: none; }
 
+    /* Bridge token pairing */
+    .pair { display: flex; flex-direction: column; gap: 8px; }
+    .pair[hidden] { display: none; }
+    .pair label { font-size: 11.5px; font-weight: 600; color: var(--muted); }
+    .pair input {
+      width: 100%;
+      min-height: 32px;
+      padding: 6px 8px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg);
+      color: var(--text);
+      font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+      font-size: 11px;
+    }
+    .pair input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
     /* Buttons */
     .actions {
       display: grid;
@@ -182,10 +199,20 @@
       <div id="servers"></div>
     </section>
 
+    <section class="card pair" id="pair" hidden>
+      <label for="token">Bridge token</label>
+      <input id="token" type="password" autocomplete="off" spellcheck="false"
+             placeholder="Paste the token printed by the bridge" />
+      <button id="save-token">Save token</button>
+      <p class="hint">Shown in the bridge window on first run, or in <code>~/.snapgent/bridge_token</code>.</p>
+    </section>
+
     <div class="actions">
       <button class="ghost" id="reconnect">↻ Reconnect</button>
       <button class="ghost" id="restart">⟳ Restart</button>
       <button class="ghost full" id="settings">⚙ Settings</button>
+      <button class="ghost full" id="rotate-token" hidden>🔑 Rotate token</button>
+      <button class="ghost full" id="forget-token" hidden>🗝 Forget saved token</button>
     </div>
 
     <p class="hint">

@@ -3,9 +3,10 @@
 
 Boots a REAL bridge (bridge.py) on an ephemeral port with a REAL
 workspace_mcp.py subprocess, then drives it over a real WebSocket:
-tool catalog, file tools, symlink containment, run_command policy,
-write/edit/delete roundtrip, and kill -> restart recovery (both the
-inline restart on the next call and the 5 s monitor restart).
+tool catalog, handshake auth, file tools, symlink containment,
+run_command policy, write/edit/delete roundtrip, and kill -> restart
+recovery (both the inline restart on the next call and the 5 s monitor
+restart).
 
 Usage:
     /usr/bin/python3 scripts/e2e_live.py
@@ -13,11 +14,14 @@ Usage:
 Exit code 0 = all checks passed, 1 = at least one failed.
 Never touches port 17613 (a user's own bridge may live there): the port
 is picked by binding port 0 and handing it to the bridge subprocess.
-Cleans up every file and process it creates.
+Cleans up every file and process it creates. The bridge gets a pinned
+`ZS_BRIDGE_TOKEN`, so the run also exercises the token check without
+writing anything to `~/.snapgent/bridge_token`.
 """
 import asyncio
 import json
 import os
+import secrets
 import signal
 import socket
 import subprocess
@@ -76,7 +80,7 @@ async def wait_listening(port, proc, timeout=15.0):
     raise RuntimeError(f"bridge did not listen on port {port} within {timeout}s")
 
 
-async def run_checks(port):
+async def run_checks(port, token):
     outside = Path("/tmp") / f"e2e_outside_secret_{os.getpid()}.txt"
     outside.write_text("E2E_TOPSECRET_OUTSIDE\n", encoding="utf-8")
     link = ROOT / "e2e_link_secret.txt"
@@ -90,12 +94,23 @@ async def run_checks(port):
         # The bridge listens before its MCP subprocesses finish starting
         # (async startup), so the first `connected` may advertise 0 tools.
         # Reconnect until the catalog is populated (timeout 15 s).
+        # The token is pinned by main(), so the handshake is part of the run:
+        # a client without it must be refused with 1008 before anything else.
+        try:
+            async with websockets.connect(f"ws://127.0.0.1:{port}") as unpaired:
+                await unpaired.recv()
+            check("handshake_requires_token", False, "an unpaired client was accepted")
+        except websockets.exceptions.ConnectionClosed as error:
+            check("handshake_requires_token", error.rcvd is not None and error.rcvd.code == 1008,
+                  getattr(getattr(error, "rcvd", None), "reason", ""))
+
+        url = f"ws://127.0.0.1:{port}/?token={token}"
         ws = None
         conn = None
         deadline = time.monotonic() + 15.0
         while time.monotonic() < deadline:
             try:
-                ws = await websockets.connect(f"ws://127.0.0.1:{port}")
+                ws = await websockets.connect(url)
                 conn = json.loads(await ws.recv())
             except Exception:
                 if ws is not None:
@@ -299,8 +314,13 @@ async def main():
                 }
             }
         }), encoding="utf-8")
-        env = {**os.environ, "ZS_BRIDGE_PORT": str(port),
-               "ZS_BRIDGE_CONFIG": str(config_path)}
+        # Deterministic auth for the run: pin the token, and drop anything that
+        # would turn the check off or point at the developer's real token file.
+        token = secrets.token_urlsafe(24)
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("ZS_BRIDGE_AUTH", "ZS_BRIDGE_TOKEN_FILE")}
+        env.update(ZS_BRIDGE_PORT=str(port), ZS_BRIDGE_CONFIG=str(config_path),
+                   ZS_BRIDGE_TOKEN=token)
         proc = subprocess.Popen(
             [sys.executable, str(ROOT / "bridge.py")],
             cwd=str(ROOT), env=env,
@@ -308,7 +328,7 @@ async def main():
         )
         try:
             await wait_listening(port, proc)
-            await run_checks(port)
+            await run_checks(port, token)
         finally:
             proc.terminate()
             try:

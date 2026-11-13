@@ -11,6 +11,7 @@
 [![License](https://img.shields.io/badge/LICENSE-GPL--3.0-FACC15?style=flat-square&labelColor=111111&logo=opensourceinitiative&logoColor=FACC15)](LICENSE)
 [![Manifest](https://img.shields.io/badge/MANIFEST-V3-FACC15?style=flat-square&labelColor=111111&logo=googlechrome&logoColor=FACC15)](https://developer.chrome.com/docs/extensions/develop/migrate/what-is-mv3/)
 [![Release](https://img.shields.io/badge/RELEASE-V3.9.4-FACC15?style=flat-square&labelColor=111111&logo=semanticrelease&logoColor=FACC15)](https://github.com/herdodp/snapgent-connector/releases/tag/V3.9.4)
+[![CI](https://img.shields.io/github/actions/workflow/status/Abelion512/webmcp/tests.yml?branch=linux-stability&label=CI&style=flat-square&labelColor=111111&logo=githubactions&logoColor=FACC15)](https://github.com/Abelion512/webmcp/actions/workflows/tests.yml)
 [![MCP](https://img.shields.io/badge/PROTOCOL-MCP-FACC15?style=flat-square&labelColor=111111&logo=modelcontextprotocol&logoColor=FACC15)](https://modelcontextprotocol.io/)
 
 </div>
@@ -70,6 +71,8 @@ The default target. Connects to the workspace folder you configure with `ZS_WORK
 5. The **result** is sent back into chat, and the AI continues working.
 
 The workspace MCP server is configured locally by `setup-config.py`; it runs in the folder you set with `ZS_WORKSPACE_ROOT`.
+
+To delegate a prompt to the same chat from a local A2A client, see `docs/a2a.md`.
 
 ---
 
@@ -166,10 +169,45 @@ directory.
 - **Linux** — open a terminal in the extracted release folder and run
   `bash Linux_Start.sh`. It writes the `repo` MCP server entry pointing at your
   workspace root to the ignored local `config.json`. It uses
-  `bridge.py`; the first launch installs `websockets` for your user, or creates
-  a local Python environment if your distribution blocks user installs.
+  `bridge.py`; the first launch installs the pinned dependency from
+  `requirements.txt` for your user, or creates a local Python environment if your
+  distribution blocks user installs.
 
 Keep the terminal window open while the bridge runs.
+
+**Pairing the extension (bridge token)**
+
+The bridge only accepts connections from the extension, and requires a per-install
+token, so a regular web page cannot drive your workspace through port 17613.
+
+1. The first start creates `~/.snapgent/bridge_token` (mode `600`) and prints the
+   value once in the bridge window, as `bridge token: …`.
+2. Open the snapgentV3 popup. While the bridge is refusing the connection it shows
+   `Bridge token required` together with a token field.
+3. Paste the token, press **Save**, and the popup reconnects as `Connected`.
+
+Updating? Replace the extension **and** the bridge from the same release: the
+check fails closed, and an extension that predates this change has no token
+field, so against a new bridge it can only report `Bridge offline`. Start the
+bridge with `ZS_BRIDGE_AUTH=0` to keep such an extension working.
+
+The extension keeps the token in `chrome.storage.local`. **🔑 Rotate token** (visible
+while connected) asks the bridge for a new secret and saves it on both sides; the
+bridge then closes every authenticated connection, so a leaked token cannot keep a
+live session. The extension reconnects with the new value by itself — no restart
+needed, and the popup reads `Token rotated · reconnecting` for that second instead of
+`Bridge offline`. **🗝 Forget saved token** clears the stored copy and shows the pairing field
+again.
+
+Advanced: `ZS_BRIDGE_TOKEN_FILE` moves the token file, `ZS_BRIDGE_TOKEN` pins an exact
+value (rotation is then refused), and `ZS_BRIDGE_AUTH=0` disables token auth — only
+the token check is affected, the origin allowlist stays active. To inspect the
+configuration without starting the bridge, run `bash Linux_Start.sh --check`.
+
+If the popup keeps saying `Bridge token required` after saving, the token was rotated
+since you copied it: paste the current value from `~/.snapgent/bridge_token`. A `1008`
+policy-violation close in the bridge window means the same thing — see
+[`docs/linux-stability.md`](docs/linux-stability.md).
 
 **④ Start a session**
 
@@ -242,11 +280,14 @@ snapgent-full/
 ├── Linux_Start.sh             # Linux bridge launcher
 ├── switch-project.sh          # Switch a running bridge's workspace root
 ├── bridge.py                  # Cross-platform Python MCP bridge
+├── bridge_auth.py             # Handshake policy: origin allowlist, token file, rotation
+├── requirements.txt           # Pinned websockets range for the bridge
 ├── workspace_mcp.py           # Workspace MCP server source (28 workspace tools)
 ├── test_bridge.py             # MCP bridge protocol tests
 ├── test_setup_config.py       # MCP setup helper tests
 ├── test_workspace_mcp.py      # Workspace MCP server tests
 ├── scripts/e2e_live.py        # Live e2e: real bridge + subprocess on an ephemeral port
+├── scripts/smoke_extension_live.py  # Live handshake/rotation smoke in headless Chrome
 └── sync-upstream.sh           # Sync with upstream, keeping purged paths deleted
 ```
 
@@ -270,7 +311,10 @@ are in [`docs/code-standards.md`](docs/code-standards.md).
 Tests: `/usr/bin/python3 -m pytest -q` (Python), `node
 snapgent-extension/test-*.js` (extension stub-DOM), and
 `/usr/bin/python3 scripts/e2e_live.py` (live bridge + subprocess).
-GitHub Actions runs the same suites on every push/PR.
+GitHub Actions runs the same suites on every push/PR. The pairing and rotation
+handshake needs a real browser, so it has its own manual smoke:
+`/usr/bin/python3 scripts/smoke_extension_live.py` (headless Chrome, throwaway
+bridge on ports 17613/9333).
 
 ---
 
@@ -280,6 +324,7 @@ GitHub Actions runs the same suites on every push/PR.
 |---|---|---|
 | snapgentV3 bar is missing | Extension is disabled or site access is blocked | Check the extension is enabled and allowed on the current AI chat site, then reload the tab |
 | Bridge is offline | Bridge is not running | Run `bash Linux_Start.sh` (Linux) |
+| Popup shows `Bridge token required` | The bridge refuses the connection without its per-install token (close code 1008) | Paste the token from the bridge window or `~/.snapgent/bridge_token` into the popup field and press **Save** |
 | MCP server keeps dying / tools fail after a while | Subprocess crashed; the bridge restarts it with backoff (5 s → 300 s) | Send `get_bridge_status` over the WebSocket and check `restart_attempts`, `error`, and `log_tail` (see `docs/security-and-ops.md`) |
 | AI replies without using tools | Provider/model stopped following commands | Remind it to use snapgentV3 commands or start a new chat |
 | A configured MCP server is missing from the target dropdown | The server was switched off in the **MCP servers** panel, or the extension is outdated | Open **MCP servers** from the ⋯ menu on the snapgent bar and tick the server, then reload the extension in `chrome://extensions` and refresh the chat tab |

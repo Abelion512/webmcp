@@ -55,6 +55,26 @@ legitimate workspace operation.
 Real isolation for untrusted work is a separate OS user, container, or
 VM — not this denylist.
 
+## Bridge handshake auth
+
+The bridge listens on loopback, but any local process and any web page can reach
+`ws://127.0.0.1:17613`, so the handshake is checked before a client is accepted
+(`bridge_auth.py`):
+
+- **Origin allowlist.** Only `chrome-extension://`, `moz-extension://` and
+  `safari-web-extension://` origins, plus clients that send no `Origin` at all
+  (native processes), get through. Anything else closes with `1008`.
+- **Per-install token.** `~/.snapgent/bridge_token` (mode `600`, directory `700`),
+  generated on first run and compared in constant time. Without it a connection
+  closes with `1008`; `ZS_BRIDGE_AUTH=0` turns only this check off, never the
+  allowlist. `ZS_BRIDGE_TOKEN` pins the value and disables rotation.
+- **Rotation revokes sessions.** `rotate_token` writes the new secret, answers
+  with it, then closes every authenticated socket (`1012`) so a leaked token
+  cannot keep a live connection.
+
+Pairing, rotation, and the close codes are written up in
+[`linux-stability.md`](linux-stability.md#bridge-auth-troubleshooting).
+
 ## Bridge resilience
 
 `bridge.py` spawns each configured MCP server as an asyncio subprocess
