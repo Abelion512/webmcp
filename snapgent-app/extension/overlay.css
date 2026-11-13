@@ -147,14 +147,14 @@ html.zs-light #zs-bar.zs-bar-anchored {
    card's own padding. Mounting here (instead of the anchored fallback) grows
    the composer upward and lifts the page's "Scroll to bottom" button with it,
    so the two never overlap. */
-[class*='ComposerLayoutRoot'] > #zs-bar.zs-prov-chatgpt {
+[class*='ComposerLayoutRoot'] > #zs-bar.zs-bar-inline.zs-bar-inside.zs-prov-chatgpt {
   grid-area: auto;
   margin: 0;
   padding-left: 16px;
   padding-right: 16px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
-html.zs-light [class*='ComposerLayoutRoot'] > #zs-bar.zs-prov-chatgpt {
+html.zs-light [class*='ComposerLayoutRoot'] > #zs-bar.zs-bar-inline.zs-bar-inside.zs-prov-chatgpt {
   border-bottom-color: rgba(0, 0, 0, 0.08);
 }
 
