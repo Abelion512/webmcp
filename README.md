@@ -308,6 +308,11 @@ dead MCP servers with exponential backoff, and answers
 egress and no `gh` credentials) and refuse `main`/`master`, so every change
 travels through a feature branch and a pull request.
 
+Sandboxed commands run under `bubblewrap` with user/IPC/PID/UTS/cgroup
+namespaces unshared and all capabilities dropped; it fails closed when `bwrap`
+is missing or unusable, and `ZS_ALLOW_UNSANDBOXED=1` opts back into unsandboxed
+execution. See [`docs/security-and-ops.md`](docs/security-and-ops.md).
+
 Start with [`docs/security-and-ops.md`](docs/security-and-ops.md) for
 the containment model, the `run_command` policy, bridge recovery, and
 how to diagnose a running bridge (including opt-in JSON logging with
