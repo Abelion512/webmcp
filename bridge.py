@@ -27,6 +27,7 @@ from bridge_auth import (
     TOKEN_PATH_ENV,
     auth_disabled,
     header_value,
+    host_allowed,
     load_auth_token,
     origin_allowed,
     presented_token,
@@ -715,6 +716,13 @@ class Bridge:
 
     async def handle_client(self, websocket: Any, _path: Optional[str] = None) -> None:
         origin = header_value(websocket, "Origin")
+        host = header_value(websocket, "Host")
+        if not host_allowed(host):
+            self._log_rejection(
+                f"host:{host}", f"rejected client with unauthorized host header {host!r}"
+            )
+            await self._reject_handshake(websocket, "unauthorized host header")
+            return
         if not origin_allowed(origin):
             self._log_rejection(
                 f"origin:{origin}", f"rejected client from origin {origin!r}"

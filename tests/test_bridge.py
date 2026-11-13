@@ -187,7 +187,17 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     def test_restart_backoff_is_exponential_and_capped(self):
         server = bridge.MCPServer("mock", {})
         delays = [server.record_restart_failure() for _ in range(12)]
-        self.assertEqual(delays[:4], [5.0, 10.0, 20.0, 40.0])
+        # Jittered backoff: each delay stays within +/-20% of 5 * 2**n, and the
+        # capped tail never exceeds RESTART_MAX_DELAY_SECONDS.
+        for attempt, delay in enumerate(delays):
+            base = min(
+                bridge.RESTART_BASE_DELAY_SECONDS * (2 ** attempt),
+                bridge.RESTART_MAX_DELAY_SECONDS,
+            )
+            self.assertGreaterEqual(delay, 0.8 * base)
+            self.assertLessEqual(
+                delay, min(1.2 * base, bridge.RESTART_MAX_DELAY_SECONDS)
+            )
         self.assertTrue(all(d <= bridge.RESTART_MAX_DELAY_SECONDS for d in delays))
         self.assertEqual(server.restart_attempts, 12)
         self.assertGreater(server.next_restart_at, 0.0)
