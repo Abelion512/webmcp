@@ -27,9 +27,9 @@ bridge.py                  WebSocket bridge (asyncio subprocess supervisor)
 bridge_auth.py             Handshake policy: origin allowlist, token file, rotation
 workspace_mcp.py           Workspace MCP server (28 tools, stdio)
 setup-config.py            Writes config.json (Linux only)
-test_*.py                  Python unit tests (root, stdlib unittest style)
-scripts/e2e_live.py        Live e2e: real bridge + subprocess, ephemeral port
-scripts/smoke_extension_live.py  Live handshake/rotation smoke in headless Chrome
+tests/test_*.py            Python unit tests (stdlib unittest style; pytest config in pyproject.toml)
+e2e/e2e_live.py             Live e2e: real bridge + subprocess, ephemeral port
+e2e/smoke_extension_live.py Live handshake/rotation smoke in headless Chrome
 snapgent-extension/
   background.js            Service worker: owns the bridge WebSocket
   popup.html / popup.js    Popup UI (status only, no logic)
@@ -84,25 +84,26 @@ Rules:
    test that fails without it. Test names state behavior:
    `test_symlink_traversal_does_not_leak_external_files`, not
    `test_search`. Pyramid shape: many unit (`test_*.py`, stub-DOM
-   `test-*.js`), one live e2e (`scripts/e2e_live.py`), all in CI.
+   `test-*.js`), one live e2e (`e2e/e2e_live.py`), all in CI.
 
 ## Enforcement (automated, not willpower)
 
 | Check | Where | Command |
 | --- | --- | --- |
 | Python unit | CI `tests` job | `/usr/bin/python3 -m pytest -q` |
-| Python static (unused imports/names) | CI `tests` job | `python -m pyflakes workspace_mcp.py bridge.py bridge_auth.py test_*.py scripts/e2e_live.py scripts/smoke_extension_live.py setup-config.py` |
+| Python static (unused imports/names) | CI `tests` job | `python -m pyflakes workspace_mcp.py bridge.py bridge_auth.py setup-config.py tests/*.py e2e/*.py` |
 | JS syntax + stub-DOM | CI `tests` job | `node --check` per file in review; `node snapgent-extension/test-*.js` |
-| Live e2e | CI `e2e` job | `python scripts/e2e_live.py` |
-| Pairing/rotation handshake | Manual (needs Chrome) | `python scripts/smoke_extension_live.py` |
+| Live e2e | CI `e2e` job | `python e2e/e2e_live.py` |
+| Pairing/rotation handshake | Manual (needs Chrome) | `python e2e/smoke_extension_live.py` |
 | Editor formatting baseline | `.editorconfig` | 4-space Python, 2-space JS/HTML/YAML, LF, final newline, 100-col soft limit |
 
 ## Known deviations (documented, not drift)
 
-- **Tests at root, not `tests/`.** The project is flat and stdlib-only;
-  `test_*.py` at root keeps `import workspace_mcp` working with zero
-  packaging. Moving to `tests/` requires a package layout decision —
-  do it as its own change, not as a drive-by.
+- **Tests in `tests/`, e2e in `e2e/`.** The project stays flat at the root for
+  runtime modules (`bridge.py`, `workspace_mcp.py`), but test and live-e2e
+  scripts live in their own folders so the root lists only shippable code.
+  `python -m pytest -q` from the root works via `pythonpath = ["."]` in
+  `pyproject.toml`; `python -m unittest discover -s tests` works via `python -m`.
 - **Line length ~100, not 79/80.** The 28-tool catalog is written as
   one `_tool(...)` per line for scanability; PEP 8 itself says
   consistency within a module wins. New code should stay ≤100.
