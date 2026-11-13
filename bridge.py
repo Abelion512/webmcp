@@ -2,6 +2,7 @@
 """Cross-platform local WebSocket bridge for Snapgent MCP servers."""
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import os
@@ -10,6 +11,7 @@ import secrets
 import signal
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -379,6 +381,16 @@ class Bridge:
         self.token = token
         self._reject_log: Dict[str, Tuple[float, int]] = {}
         self._rotate_lock = asyncio.Lock()
+        # A2A delegation: one browser tab, one generation.
+        self._pending_prompts: Dict[str, asyncio.Future] = {}
+        self._prompt_lock = asyncio.Lock()
+        # The socket a pending prompt belongs to. Only that socket may resolve it:
+        # a reply is trusted only from the socket the prompt was delivered to.
+        # `self.clients` membership requires the bridge token handshake (see
+        # handle_client), so prompt delivery is restricted to authenticated
+        # extension sockets.
+        self._prompt_owner: Any = None
+        self._last_client: Any = None
 
     def load_config(self) -> Dict[str, Dict[str, Any]]:
         if not CONFIG_PATH.exists():
@@ -536,11 +548,19 @@ class Bridge:
             return_exceptions=True,
         )
 
-    async def _send_client(self, client: Any, message: Dict[str, Any]) -> None:
+    async def _send_client(self, client: Any, message: Dict[str, Any]) -> bool:
+        """Send and report delivery so callers can fail fast.
+
+        A dropped socket used to be swallowed here: a prompt sent to an owner
+        that had just disconnected would silently never arrive and the A2A
+        caller would wait out the whole timeout.
+        """
         try:
             await client.send(_json_line(message))
         except Exception as error:
             log(f"bridge: failed to send to client: {error}")
+            return False
+        return True
 
     async def revoke_clients(self) -> int:
         """Close every authenticated connection so each one must re-handshake.
@@ -615,7 +635,67 @@ class Bridge:
         try:
             await websocket.close(code=1008, reason=reason)
         except Exception:
-            pass
+            return False
+        return True
+
+    def _fail_pending_prompts(self, reason: str) -> None:
+        for future in list(self._pending_prompts.values()):
+            if not future.done():
+                future.set_result({"ok": False, "error": reason})
+        self._pending_prompts.clear()
+        self._prompt_owner = None
+
+    async def submit_prompt(self, prompt: str, timeout: float) -> Dict[str, Any]:
+        """Delegate one prompt to the browser extension. Single-flight.
+
+        The deadline covers the queue wait too: a second task that waits for the
+        lock must not start a generation the caller has already given up on.
+        """
+        if not isinstance(prompt, str) or not prompt.strip():
+            return {"ok": False, "error": "Empty prompt."}
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        timed_out = {"ok": False, "error": f"The web AI did not answer within {int(timeout)}s."}
+        async with self._prompt_lock:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return timed_out
+            async with self._client_lock:
+                if self._last_client in self.clients:
+                    client = self._last_client
+                else:
+                    client = next(iter(self.clients), None)
+                if client is None:
+                    return {"ok": False, "error": "No Snapgent extension is connected."}
+            prompt_id = f"p{uuid.uuid4().hex}"
+            future: asyncio.Future = loop.create_future()
+            self._pending_prompts[prompt_id] = future
+            self._prompt_owner = client
+            try:
+                sent = await self._send_client(client, {"type": "submit_prompt", "id": prompt_id, "prompt": prompt})
+                if not sent:
+                    return {"ok": False, "error": "The Snapgent extension disconnected before the prompt could be delivered."}
+                return await asyncio.wait_for(future, remaining)
+            except asyncio.TimeoutError:
+                return timed_out
+            finally:
+                self._pending_prompts.pop(prompt_id, None)
+                if self._prompt_owner is client:
+                    self._prompt_owner = None
+
+    async def _resolve_prompt(self, websocket: Any, request: Dict[str, Any]) -> None:
+        prompt_id = request.get("prompt_id")
+        # Only the socket the prompt was sent to may resolve it.
+        if websocket is not self._prompt_owner:
+            await self._send_client(websocket, {"type": "prompt_ack", "id": request.get("id")})
+            return
+        future = self._pending_prompts.pop(prompt_id, None) if isinstance(prompt_id, str) else None
+        if future is not None and not future.done():
+            if request.get("ok"):
+                future.set_result({"ok": True, "text": str(request.get("text") or "")})
+            else:
+                future.set_result({"ok": False, "error": str(request.get("error") or "The web AI failed.")})
+        await self._send_client(websocket, {"type": "prompt_ack", "id": request.get("id")})
 
     async def handle_client(self, websocket: Any, _path: Optional[str] = None) -> None:
         origin = header_value(websocket, "Origin")
@@ -635,6 +715,7 @@ class Bridge:
                 return
         async with self._client_lock:
             self.clients.add(websocket)
+            self._last_client = websocket
         log("extension connected")
         await self._send_client(websocket, self._connected_message())
         try:
@@ -651,6 +732,12 @@ class Bridge:
         finally:
             async with self._client_lock:
                 self.clients.discard(websocket)
+                remaining = bool(self.clients)
+            # Fail prompts owned by the departing socket even when other
+            # clients remain: otherwise the caller waits the full timeout on
+            # an owner that will never answer.
+            if not remaining or self._prompt_owner is websocket:
+                self._fail_pending_prompts("The extension disconnected.")
             log("extension disconnected")
 
     async def _handle_request(self, websocket: Any, request: Dict[str, Any]) -> None:
@@ -709,6 +796,8 @@ class Bridge:
             await self._change_server(websocket, request, remove=False)
         elif kind == "remove_server":
             await self._change_server(websocket, request, remove=True)
+        elif kind == "prompt_result":
+            await self._resolve_prompt(websocket, request)
         else:
             await self._send_client(
                 websocket,
@@ -926,6 +1015,41 @@ class Bridge:
             )
 
 
+def build_a2a_server(bridge: "Bridge", loop: asyncio.AbstractEventLoop) -> Any:
+    """Return an A2A HTTP facade whose submit() runs bridge.submit_prompt."""
+    import a2a_server
+
+    try:
+        port = int(os.environ.get("ZS_A2A_PORT", str(a2a_server.DEFAULT_PORT)))
+    except ValueError:
+        port = a2a_server.DEFAULT_PORT
+    if not 0 <= port <= 65535:
+        port = a2a_server.DEFAULT_PORT
+    try:
+        timeout_ms = int(os.environ.get("ZS_A2A_TIMEOUT_MS", str(a2a_server.DEFAULT_TIMEOUT_MS)))
+    except ValueError:
+        timeout_ms = a2a_server.DEFAULT_TIMEOUT_MS
+    token = os.environ.get("ZS_A2A_TOKEN") or secrets.token_urlsafe(32)
+
+    def submit(prompt: str, task_timeout: float) -> Dict[str, Any]:
+        future = asyncio.run_coroutine_threadsafe(bridge.submit_prompt(prompt, task_timeout), loop)
+        try:
+            return future.result(task_timeout + 60)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            return {"ok": False, "error": "Timed out waiting for the browser bridge."}
+
+    server = a2a_server.A2AServer(
+        submit,
+        host=HOST,
+        port=port,
+        token=token,
+        base_url=f"http://{HOST}:{port}",
+        timeout_ms=timeout_ms,
+    )
+    return server
+
+
 async def run() -> None:
     if websockets is None:
         raise RuntimeError(
@@ -954,7 +1078,7 @@ async def run() -> None:
             # world-readable file next to the workspace, and get_bridge_status
             # tails it back to every paired client. The popup pairing flow
             # reads the token from the token file, not from this message.
-            log(f"first run: paste this token into the Snapgent popup once (it is saved by the extension)")
+            log("first run: paste this token into the Snapgent popup once (it is saved by the extension)")
             log(f"bridge token saved to {token_path()}")
     else:
         log(
@@ -962,6 +1086,19 @@ async def run() -> None:
             f"Unset {AUTH_DISABLE_ENV} and restart the bridge to require a token."
         )
     loop = asyncio.get_running_loop()
+    a2a = None
+    if os.environ.get("ZS_A2A_DISABLE") != "1":
+        try:
+            a2a = build_a2a_server(bridge, loop)
+            a2a.start()
+            log(f"A2A agent card: http://{HOST}:{a2a.port}/.well-known/agent-card.json")
+            # Token goes to the terminal only, never to the log file: the file is
+            # world-readable by default and this token gates an RPC that can write
+            # workspace files.
+            print(f"A2A bearer token: {a2a.token} (set ZS_A2A_TOKEN to pin it)", flush=True)
+        except OSError as error:
+            log(f"A2A server disabled: {error}")
+            a2a = None
     stop_event = asyncio.Event()
     async def _startup_then_monitor() -> None:
         # Servers start in parallel after the websocket is already listening;
@@ -983,6 +1120,8 @@ async def run() -> None:
     finally:
         monitor_task.cancel()
         await asyncio.gather(monitor_task, return_exceptions=True)
+        if a2a is not None:
+            a2a.stop()
         server.close()
         await server.wait_closed()
         await bridge.stop_servers()
