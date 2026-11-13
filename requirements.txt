@@ -1,7 +1,0 @@
-# Runtime dependency of bridge.py (the WebSocket transport).
-# Pinned so a new release cannot change handshake/serve behaviour silently.
-# 16.0 dropped Python 3.9, which the launchers still support, so older
-# interpreters get the newest release that still runs there (same API:
-# ServerConnection.request, headers and path are available since 13.0).
-websockets==16.0; python_version >= "3.10"
-websockets==15.0.1; python_version < "3.10"
