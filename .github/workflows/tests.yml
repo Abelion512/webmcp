@@ -27,11 +27,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # Explicit pip cache. This replaces setup-python's implicit `cache: pip`
+      # so the key and restore behaviour are visible in the workflow: the key is
+      # the pinned requirements hash, and restore-keys reuses the previous entry
+      # when the pins change instead of caching from scratch.
+      - name: Cache pip
+        uses: actions/cache@v6.1.0
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
-          cache-dependency-path: "**/requirements*.txt"
       - name: Install test deps
         run: python -m pip install pytest websockets pyflakes
       - name: Python static check (unused imports/names)
@@ -58,15 +69,42 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Cache pip
+        uses: actions/cache@v6.1.0
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
-          cache-dependency-path: "**/requirements*.txt"
       - name: Install e2e deps
         run: python -m pip install websockets
+
+      # apt-get install consumes the .deb files it uses, so the archive cache is
+      # primed with --download-only before the install and re-primed afterwards
+      # for the post step. A warm cache installs with --no-download; a cold one
+      # falls back to a normal download. The reinstall --download-only at the
+      # end forces apt to fetch the .deb even though the package is installed.
+      - name: Cache apt packages
+        uses: actions/cache@v6.1.0
+        with:
+          path: /var/cache/apt/archives
+          key: ${{ runner.os }}-apt-bubblewrap-${{ hashFiles('.github/workflows/tests.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-apt-bubblewrap-
+
       - name: Install sandbox deps
-        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --download-only bubblewrap || true
+          if ! sudo apt-get install -y --no-download bubblewrap; then
+            sudo apt-get install -y bubblewrap
+          fi
+          sudo apt-get install -y --reinstall --download-only bubblewrap || true
       - name: Live e2e (real bridge + subprocess, ephemeral port)
         run: |
           if [ -f e2e/e2e_live.py ]; then
