@@ -1,5 +1,4 @@
 import os
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -236,16 +235,26 @@ class WorkspaceMcpTests(unittest.TestCase):
 
     def test_run_process_does_not_retry_unsandboxed_for_command_errors(self):
         calls = []
+        stderr_text = "Permission denied\n"
+        class FakeProcess:
+            def __init__(self, argv, **kwargs):
+                calls.append(argv)
+                self.stdout = tempfile.TemporaryFile()
+                self.stderr = tempfile.TemporaryFile()
+                self.stderr.write(stderr_text.encode("utf-8"))
+                self.stderr.seek(0)
+                self.returncode = 1
 
-        def fake_run(argv, **kwargs):
-            calls.append(argv)
-            return subprocess.CompletedProcess(
-                argv, 1, stdout="", stderr="Permission denied\n"
-            )
+            def wait(self, timeout=None):
+                return self.returncode
+
+            def kill(self):
+                pass
+
 
         with patch.object(
             workspace_mcp, "_sandboxed_argv", return_value=["bwrap", "--", "cat"]
-        ), patch.object(workspace_mcp.subprocess, "run", side_effect=fake_run):
+        ), patch.object(workspace_mcp.subprocess, "Popen", side_effect=FakeProcess):
             with self.assertRaises(RuntimeError):
                 workspace_mcp._run_process(["cat"], self.workspace)
         self.assertEqual(len(calls), 1)
@@ -255,16 +264,26 @@ class WorkspaceMcpTests(unittest.TestCase):
         # failed sandboxed result must surface as an error, never trigger a
         # full-host re-run.
         calls = []
+        stderr_text = "bwrap: setting up uid map: denied\n"
+        class FakeProcess:
+            def __init__(self, argv, **kwargs):
+                calls.append(argv)
+                self.stdout = tempfile.TemporaryFile()
+                self.stderr = tempfile.TemporaryFile()
+                self.stderr.write(stderr_text.encode("utf-8"))
+                self.stderr.seek(0)
+                self.returncode = 1
 
-        def fake_run(argv, **kwargs):
-            calls.append(argv)
-            return subprocess.CompletedProcess(
-                argv, 1, stdout="", stderr="bwrap: setting up uid map: denied\n"
-            )
+            def wait(self, timeout=None):
+                return self.returncode
+
+            def kill(self):
+                pass
+
 
         with patch.object(
             workspace_mcp, "_sandboxed_argv", return_value=["bwrap", "--", "sh"]
-        ), patch.object(workspace_mcp.subprocess, "run", side_effect=fake_run):
+        ), patch.object(workspace_mcp.subprocess, "Popen", side_effect=FakeProcess):
             with self.assertRaises(RuntimeError):
                 workspace_mcp._run_process(["sh"], self.workspace)
         self.assertEqual(len(calls), 1)
