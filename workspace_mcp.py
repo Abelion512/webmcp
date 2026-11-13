@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -124,9 +125,181 @@ def _iter_files(base: Path, root: Path) -> Iterable[Path]:
                 yield candidate
 
 
+def _sandbox_network_enabled() -> bool:
+    value = os.environ.get("ZS_SANDBOX_NETWORK", "0").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+_SECURE_DEVNULL: Optional[str] = None
+
+
+def _secure_devnull() -> Optional[str]:
+    """Return a path to a regular, non-symlinkable /dev/null stand-in."""
+    global _SECURE_DEVNULL
+    if _SECURE_DEVNULL and os.path.isfile(_SECURE_DEVNULL) and not os.path.islink(
+        _SECURE_DEVNULL
+    ):
+        # Every sandboxed command's >/dev/null lands in this file; reset it
+        # per bind so a long-lived server cannot fill the host disk.
+        try:
+            open(_SECURE_DEVNULL, "w").close()
+        except OSError:
+            pass
+        return _SECURE_DEVNULL
+    try:
+        fd, path = tempfile.mkstemp(prefix=".snapgent-devnull-", dir="/tmp")
+    except OSError as exc:
+        sys.stderr.write(
+            "workspace_mcp: could not create sandbox /dev/null stand-in "
+            f"({exc}); running command unsandboxed\n"
+        )
+        return None
+    os.close(fd)
+    _SECURE_DEVNULL = path
+    return path
+
+
+_BWRAP_USABLE: Optional[bool] = None
+
+
+def _bwrap_usable() -> bool:
+    global _BWRAP_USABLE
+    if _BWRAP_USABLE is not None:
+        return _BWRAP_USABLE
+    bwrap = shutil.which("bwrap")
+    if not bwrap:
+        _BWRAP_USABLE = False
+        return False
+    try:
+        result = subprocess.run(
+            [bwrap, "--ro-bind", "/", "/", "--", "/bin/true"],
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        _BWRAP_USABLE = False
+        return False
+    _BWRAP_USABLE = result.returncode == 0
+    return _BWRAP_USABLE
+
+
+_UNSHARE_NET_SUPPORTED: Optional[bool] = None
+
+
+def _bwrap_supports_unshare_net() -> bool:
+    global _UNSHARE_NET_SUPPORTED
+    if _UNSHARE_NET_SUPPORTED is not None:
+        return _UNSHARE_NET_SUPPORTED
+    if not _bwrap_usable():
+        _UNSHARE_NET_SUPPORTED = False
+        return False
+    bwrap = shutil.which("bwrap")
+    if not bwrap:
+        _UNSHARE_NET_SUPPORTED = False
+        return False
+    try:
+        result = subprocess.run(
+            [bwrap, "--unshare-net", "--ro-bind", "/", "/", "--", "/bin/true"],
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        _UNSHARE_NET_SUPPORTED = False
+        return False
+    _UNSHARE_NET_SUPPORTED = result.returncode == 0
+    return _UNSHARE_NET_SUPPORTED
+
+
+def _sandboxed_argv(command: List[str], root: Path) -> List[str]:
+    """Wrap a command in bubblewrap (OpenAI/Anthropic-style OS sandbox).
+
+    Filesystem: the host root is mounted read-only and only the workspace
+    root (plus an ephemeral /tmp) is writable; /home and /root are masked
+    with tmpfs so user secrets outside the workspace are not readable.
+    Network: disabled by default (ZS_SANDBOX_NETWORK=1 to allow).
+    Namespace: a fresh PID namespace plus process cleanup on parent exit.
+    Falls back to the unsandboxed command when bubblewrap is unavailable.
+    """
+    if os.name == "nt":
+        return list(command)
+    bwrap = shutil.which("bwrap")
+    if not bwrap:
+        # Silent degradation is undesirable; make it visible on stderr so
+        # operators know the advertised sandbox is inactive.
+        sys.stderr.write(
+            "workspace_mcp: bubblewrap not found; running command unsandboxed\n"
+        )
+        return list(command)
+    if not _bwrap_usable():
+        sys.stderr.write(
+            "workspace_mcp: bubblewrap unusable in this environment; "
+            "running command unsandboxed\n"
+        )
+        return list(command)
+    # A writable (regular-file) /dev/null: bwrap's --dev mount is nodev, so
+    # device nodes cannot be opened O_RDWR, which breaks git and others.
+    # Create it with O_EXCL|O_NOFOLLOW via mkstemp so a pre-existing symlink
+    # in the world-writable /tmp cannot redirect the bind to an arbitrary
+    # host file.
+    devnull_path = _secure_devnull()
+    if not devnull_path:
+        return list(command)
+    argv: List[str] = [bwrap, "--die-with-parent", "--unshare-pid"]
+    network_disabled = not _sandbox_network_enabled()
+    if network_disabled and _bwrap_supports_unshare_net():
+        argv.append("--unshare-net")
+    elif network_disabled:
+        sys.stderr.write(
+            "workspace_mcp: bwrap --unshare-net unsupported; "
+            "network not isolated\n"
+        )
+    argv += [
+        # Mount order matters: the read-only host root must bind FIRST. Fresh
+        # /proc and /dev mounts placed before it would be shadowed by the host
+        # root bind, leaking host PIDs and devices into the sandbox.
+        "--ro-bind", "/", "/",
+        "--proc", "/proc",
+        "--dev", "/dev",
+        "--bind", devnull_path, "/dev/null",
+        # Commands here never need runtime state or spool files, so hide the
+        # host /run and /var (logs, sockets, package databases) entirely.
+        "--tmpfs", "/run",
+        "--tmpfs", "/var",
+        # tmpfs /tmp first, then bind the workspace into it.
+        "--tmpfs", "/tmp",
+        "--dir", "/tmp/workspace",
+        # Bind the workspace before masking /home, /root, /mnt, /media so a
+        # workspace that lives under one of those directories is not hidden
+        # by the empty tmpfs mounts. The source path is resolved against the
+        # already-mounted host root (read-only at /), so it stays reachable.
+        "--bind", str(root), "/tmp/workspace",
+        "--tmpfs", "/home",
+        "--tmpfs", "/root",
+        "--tmpfs", "/mnt",
+        "--tmpfs", "/media",
+        "--chdir", "/tmp/workspace",
+        # Only an explicit allowlist reaches the command: the server process
+        # carries bridge/API secrets in its environment that must not leak
+        # into sandboxed subprocess output.
+        "--clearenv",
+        "--setenv", "HOME", "/tmp",
+        "--setenv", "TMPDIR", "/tmp",
+        "--setenv", "PATH", os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        "--setenv", "LANG", os.environ.get("LANG", "C.UTF-8"),
+        "--setenv", "TERM", os.environ.get("TERM", "dumb"),
+        "--setenv", "ZS_WORKSPACE_ROOT", "/tmp/workspace",
+        "--",
+    ]
+    argv += list(command)
+    return argv
+
+
 def _run_process(command: List[str], root: Path, timeout: int = 30) -> str:
+    sandboxed = _sandboxed_argv(list(command), root)
     result = subprocess.run(
-        command,
+        sandboxed,
         cwd=str(root),
         capture_output=True,
         text=True,
@@ -136,6 +309,11 @@ def _run_process(command: List[str], root: Path, timeout: int = 30) -> str:
         timeout=timeout,
         check=False,
     )
+    # No unsandboxed retry here, ever: bwrap has already passed its
+    # _bwrap_usable() probe by the time we get here, so a nonzero exit below
+    # is the command's own result (an attacker-controlled stderr can say
+    # "bwrap:" just as easily as a real setup failure can). Retrying outside
+    # the sandbox would execute a failed command with full host access.
     output = result.stdout.strip() or result.stderr.strip() or "(no output)"
     if result.returncode:
         raise RuntimeError(
@@ -484,8 +662,10 @@ def run_command(
     if not command.strip():
         raise ValueError("Command cannot be empty.")
     root = get_root()
-    extra_args = args or []
-    if not all(isinstance(arg, str) for arg in extra_args):
+    extra_args = [] if args is None else args
+    if not isinstance(extra_args, list) or not all(
+        isinstance(arg, str) for arg in extra_args
+    ):
         raise ValueError("args must be an array of strings.")
     binary = Path(command.strip()).name
     # Exact-binary deny (never prefix): "sudo" is blocked, "sudoku" is not an

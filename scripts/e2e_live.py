@@ -189,6 +189,52 @@ async def run_checks(port, token):
             check("run_command_timeout_rejected",
                   r.get("ok") is False and "timeout" in r.get("error", ""), r.get("error", ""))
 
+            # OS-level sandbox (bubblewrap): cwd is the mapped workspace and
+            # /home is masked; network is off by default.
+            import shutil as _shutil
+            import subprocess as _subprocess
+            bwrap = _shutil.which("bwrap")
+            usable = False
+            if bwrap:
+                try:
+                    usable = _subprocess.run(
+                        [bwrap, "--ro-bind", "/", "/", "--", "/bin/true"], capture_output=True, timeout=5,
+                    ).returncode == 0
+                except Exception:
+                    usable = False
+            if bwrap and usable:
+                r = await call(ws, 22, "run_command", {"command": "pwd", "args": [], "timeout": 10})
+                check("sandbox_cwd_is_workspace",
+                      r.get("ok") and r.get("text", "").strip() == "/tmp/workspace",
+                      r.get("text", "") or r.get("error", ""))
+                r = await call(ws, 23, "run_command",
+                               {"command": "ls", "args": ["/home"], "timeout": 10})
+                check("sandbox_home_masked",
+                      r.get("ok") and r.get("text", "").strip() in ("", "(no output)"),
+                      r.get("text", "") or r.get("error", ""))
+                net_supported = False
+                try:
+                    net_supported = _subprocess.run(
+                        [bwrap, "--unshare-net", "--ro-bind", "/", "/", "--", "/bin/true"],
+                        capture_output=True, timeout=5,
+                    ).returncode == 0
+                except Exception:
+                    net_supported = False
+                if net_supported:
+                    r = await call(ws, 24, "run_command",
+                                   {"command": "python3",
+                                    "args": ["-c",
+                                             "import urllib.request; print(urllib.request.urlopen('http://example.com', timeout=3).status)"],
+                                    "timeout": 10})
+                    check("sandbox_network_blocked",
+                          r.get("ok") is False,
+                          r.get("text", "") or r.get("error", ""))
+                else:
+                    check("sandbox_network_skipped", True,
+                          "unshare-net unsupported in this environment")
+            else:
+                check("sandbox_skipped", True, "bwrap unavailable")
+
             # write / edit / read / delete roundtrip
             r = await call(ws, 13, "write_file",
                            {"path": "e2e_live_tmp.txt", "content": "alpha beta"})

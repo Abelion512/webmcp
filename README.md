@@ -157,6 +157,13 @@ npm run dist     # build the Windows installer into dist/
 
 Run `bash Linux_Start.sh` (or `python3 setup-config.py` with `ZS_WORKSPACE_ROOT` set). It writes the `repo` server entry to the ignored local `config.json`.
 
+To use a different project folder, pass it as the first argument:
+`bash Linux_Start.sh ../CyClops`. To switch while the bridge is already
+running, use `bash switch-project.sh ../CyClops`; it rewrites `config.json`
+and restarts the bridge's MCP servers. A bare name is looked up in
+`ZS_PROJECTS_ROOT`, the folder containing this repo, then the current
+directory.
+
 **③ Start the bridge**
 
 - **Linux** — open a terminal in the extracted release folder and run
@@ -271,6 +278,7 @@ snapgent-full/
 ├── setup-config.py            # Configures the Linux workspace MCP server
 ├── config.json                # Generated locally by launchers (not tracked)
 ├── Linux_Start.sh             # Linux bridge launcher
+├── switch-project.sh          # Switch a running bridge's workspace root
 ├── bridge.py                  # Cross-platform Python MCP bridge
 ├── bridge_auth.py             # Handshake policy: origin allowlist, token file, rotation
 ├── requirements.txt           # Pinned websockets range for the bridge

@@ -1,4 +1,4 @@
-﻿# Local-only folders
+# Local-only folders
 Compressed/
 Deprecated/
 ExtensionPresentation/
@@ -6,6 +6,10 @@ presentation/
 config.json
 # Local bridge auth token (normally ~/.snapgent/bridge_token)
 bridge_token
+
+# Agent harness state: nested worktrees and local settings must never be
+# committed (a committed worktree would break git).
+.claude/
 
 # Build output and local backups
 routergent/
