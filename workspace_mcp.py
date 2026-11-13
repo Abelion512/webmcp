@@ -117,12 +117,13 @@ def _iter_files(base: Path, root: Path) -> Iterable[Path]:
         dirs[:] = _prune_dirs(dirs, Path(current), root)
         for name in sorted(names):
             candidate = Path(current) / name
-            # Skip files whose resolved target escapes the workspace
-            # (e.g. a symlink to /etc/passwd or ~/.ssh). os.walk does not
-            # follow symlinked dirs, but symlinked FILES are still yielded
-            # and read_text() would follow them out of the root.
-            if _inside_root(candidate, root):
-                yield candidate
+            # Only symlinked files can escape the root: os.walk starts from a
+            # resolved, validated base and _prune_dirs drops escaping dir
+            # symlinks. Skipping resolve() for plain files removes a syscall
+            # per entry, which dominates large trees.
+            if candidate.is_symlink() and not _inside_root(candidate, root):
+                continue
+            yield candidate
 
 
 def _sandbox_network_enabled() -> bool:
@@ -403,13 +404,15 @@ def find_files(path: str = ".", pattern: str = "*") -> List[str]:
         raise FileNotFoundError(f"Path not found: {path}")
     if not base.is_dir():
         raise NotADirectoryError(f"Not a directory: {path}")
-    matches = [
-        _relative(file_path, root)
-        for file_path in _iter_files(base, root)
-        if fnmatch.fnmatch(file_path.name, pattern)
-        or fnmatch.fnmatch(_relative(file_path, base), pattern)
-    ]
-    return matches[:MAX_RESULTS]
+    matches: List[str] = []
+    for file_path in _iter_files(base, root):
+        if fnmatch.fnmatch(file_path.name, pattern) or fnmatch.fnmatch(
+            _relative(file_path, base), pattern
+        ):
+            matches.append(_relative(file_path, root))
+            if len(matches) >= MAX_RESULTS:
+                break
+    return matches
 
 
 def search_files(path: str, query: str, file_pattern: str = "*", case_sensitive: bool = False) -> List[Dict[str, Any]]:
@@ -426,19 +429,23 @@ def search_files(path: str, query: str, file_pattern: str = "*", case_sensitive:
         if not fnmatch.fnmatch(file_path.name, file_pattern):
             continue
         try:
-            text = file_path.read_text(encoding="utf-8", errors="replace")
+            # Stream the file: a full read_text() copies every file into memory
+            # even when the first line already matches.
+            handle = file_path.open(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        for line_number, line in enumerate(text.splitlines(), start=1):
-            haystack = line if case_sensitive else line.lower()
-            if needle in haystack:
-                matches.append({
-                    "path": _relative(file_path, root),
-                    "line": line_number,
-                    "text": line[:500],
-                })
-                if len(matches) >= MAX_RESULTS:
-                    return matches
+        with handle:
+            for line_number, line in enumerate(handle, start=1):
+                line = line.rstrip("\r\n")
+                haystack = line if case_sensitive else line.lower()
+                if needle in haystack:
+                    matches.append({
+                        "path": _relative(file_path, root),
+                        "line": line_number,
+                        "text": line[:500],
+                    })
+                    if len(matches) >= MAX_RESULTS:
+                        return matches
     return matches
 
 
