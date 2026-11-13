@@ -324,13 +324,22 @@ const ZSProvider = (() => {
   function barMount() {
     const ed = getEditor();
     if (!ed) return null;
-    const box = ed.closest("[class*='composer-surface']");
+    // ChatGPT renamed the composer again (2026-11): the old
+    // [class*='composer-surface'] grid is gone, replaced by a flex-column
+    // ComposerLayoutRoot. Mounting the bar as its FIRST child grows the
+    // composer upward, and the page's "Scroll to bottom" button is anchored to
+    // that same bottom edge - measured live the bar lands at 678..712 and the
+    // button at 622..654, so they no longer overlap. The anchored fallback this
+    // replaces floated the bar straight across the button (~686..720 vs
+    // 656..688), which is the defect users saw.
+    const box = ed.closest("[class*='composer-surface']")
+      || ed.closest("[class*='ComposerLayoutRoot']");
     if (!box) return null;
+    // A grid container still needs its area claimed (the pre-2026-11 template);
+    // a flex column just needs the bar first, so clear any stale grid-area.
     const area = topArea(box);
-    if (area) {
-      const bar = document.getElementById("zs-bar");
-      if (bar && bar.style.gridArea !== area) bar.style.gridArea = area;
-    }
+    const bar = document.getElementById("zs-bar");
+    if (bar) bar.style.gridArea = area || "";
     // Skip our own bar if already mounted, otherwise we'd insert it before itself.
     let before = box.firstElementChild;
     if (before && before.id === "zs-bar") before = before.nextElementSibling;

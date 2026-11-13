@@ -141,6 +141,23 @@ html.zs-light #zs-bar.zs-bar-anchored {
    inside it. */
 [class*="composer-surface"]:has(> #zs-bar.zs-prov-chatgpt) { padding-bottom: 12px; }
 
+/* ChatGPT 2026-11: the composer-surface grid was replaced by a flex-column
+   ComposerLayoutRoot and the bar mounts as its first child. The eyebrow rule
+   above does not apply to a flex child, so reset it and keep the bar inside the
+   card's own padding. Mounting here (instead of the anchored fallback) grows
+   the composer upward and lifts the page's "Scroll to bottom" button with it,
+   so the two never overlap. */
+[class*='ComposerLayoutRoot'] > #zs-bar.zs-prov-chatgpt {
+  grid-area: auto;
+  margin: 0;
+  padding-left: 16px;
+  padding-right: 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+html.zs-light [class*='ComposerLayoutRoot'] > #zs-bar.zs-prov-chatgpt {
+  border-bottom-color: rgba(0, 0, 0, 0.08);
+}
+
 /* Meta AI's composer card has a large corner radius (rounded-32 = 32px), so the
    full-width anchored bar's left/right ends run under the curve - the controls
    crowd the rounding. Inset the content by ~the

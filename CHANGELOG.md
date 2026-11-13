@@ -75,6 +75,15 @@ All notable changes to snapgentV3 Free are documented here.
 - **Added `sync-upstream.sh`:** merges upstream/main and re-purges the deleted
   artifacts on every sync.
 
+### Fixed
+- **ChatGPT: the snapgentV3 bar no longer covers the page's "Scroll to bottom"
+  button.** ChatGPT replaced the composer-surface grid with a flex-column
+  `ComposerLayoutRoot`, so `barMount()` found no container and the bar fell back
+  to anchored (fixed) mode, floating across the button (measured live: bar
+  ~686..720 vs button 656..688). The bar now mounts as the first child of the
+  composer root, which grows the composer upward and lifts the button with it
+  (bar 678..712, button 622..654 - no overlap).
+
 ## [V3.9.4] - 2026-10-31
 
 ### Changed
