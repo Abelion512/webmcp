@@ -890,7 +890,8 @@ ol.flex-col-reverse > div.w-full:not(.mx-auto) > .zs-chip {
 /* ── toast ─────────────────────────────────────────────────── */
 .zs-toast {
   position: fixed; right: 18px; top: 80px;
-  max-width: 300px; padding: 9px 13px;
+  /* Same right-anchor constraint as the setup card. */
+  max-width: min(300px, calc(100vw - 36px)); padding: 9px 13px;
   background: rgba(30, 30, 36, 0.96); color: #e8e8ec;
   border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 10px;
   font-size: 12px; box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
@@ -936,7 +937,9 @@ html.zs-light .zs-banner-acts .zs-banner-x { color: #a16207; }
 #zs-setup {
   position: fixed;
   top: 18px; right: 18px;
-  width: 288px;
+  /* Right-anchored: never be wider than the viewport minus the margins,
+     or the card hangs off the left edge on narrow windows. */
+  width: min(288px, calc(100vw - 36px));
   padding: 0 0 14px;
   background: #161618;
   color: #ececee;
