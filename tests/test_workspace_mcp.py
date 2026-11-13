@@ -216,6 +216,24 @@ class WorkspaceMcpTests(unittest.TestCase):
             workspace_mcp.git_push()
         self.assertEqual(calls, [["git", "push", "-u", "origin", "feature/x"]])
 
+    def test_git_push_refuses_detached_head(self):
+        with patch.object(
+            workspace_mcp, "_current_branch", return_value="HEAD"
+        ), patch.object(
+            workspace_mcp, "_host_process", side_effect=AssertionError("must not run")
+        ):
+            with self.assertRaises(ValueError):
+                workspace_mcp.git_push()
+
+    def test_git_create_pr_refuses_detached_head(self):
+        with patch.object(
+            workspace_mcp, "_current_branch", return_value="HEAD"
+        ), patch.object(
+            workspace_mcp, "_host_process", side_effect=AssertionError("must not run")
+        ):
+            with self.assertRaises(ValueError):
+                workspace_mcp.git_create_pr("title")
+
     def test_run_process_does_not_retry_unsandboxed_for_command_errors(self):
         calls = []
 

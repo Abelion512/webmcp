@@ -692,7 +692,7 @@ def _host_process(command: List[str], timeout: int = 120) -> str:
     return output[:MAX_FILE_CHARS]
 
 
-def _current_branch(root: Path) -> str:
+def _current_branch() -> str:
     return _host_process(["git", "rev-parse", "--abbrev-ref", "HEAD"]).strip()
 
 
@@ -726,10 +726,13 @@ def _branch_arg(branch: str) -> str:
 
 def git_push(branch: str = "") -> str:
     """Push a feature branch to origin. The default branch is refused."""
-    root = get_root()
-    target = _branch_arg(branch.strip()) if branch.strip() else _current_branch(root)
-    if not target:
-        raise ValueError("branch is required when HEAD is detached.")
+    target = _branch_arg(branch.strip()) if branch.strip() else _current_branch()
+    # A detached HEAD reports as "HEAD", not "", so an empty check alone would
+    # let `git push -u origin HEAD` create a remote branch literally named HEAD.
+    if not target or target == "HEAD":
+        raise ValueError(
+            "refusing to push a detached HEAD; check out a feature branch first."
+        )
     _require_feature_branch(target)
     return _host_process(["git", "push", "-u", "origin", target], timeout=300)
 
@@ -738,8 +741,12 @@ def git_create_pr(title: str, body: str = "", base: str = "") -> str:
     """Open a pull request with gh. The default branch cannot be the head."""
     if not isinstance(title, str) or not title.strip():
         raise ValueError("PR title cannot be empty.")
-    root = get_root()
-    head = _current_branch(root)
+    head = _current_branch()
+    if head == "HEAD":
+        raise ValueError(
+            "refusing to open a PR from a detached HEAD; "
+            "check out a feature branch first."
+        )
     _require_feature_branch(head)
     if not _has_upstream(head):
         git_push(head)
