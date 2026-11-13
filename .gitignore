@@ -44,3 +44,14 @@ devtools/
 Thumbs.db
 desktop.ini
 __pycache__/
+*.pyc
+
+# Local snapshots and backups
+.archify/
+.freebuff/
+.remember/
+
+# Local scratch artifacts
+scripts/fork_test
+scripts/fork_test.c
+scripts/*.o

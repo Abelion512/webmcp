@@ -131,6 +131,12 @@ def _sandbox_network_enabled() -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
+def _allow_unsandboxed() -> bool:
+    """Explicit operator override for the fail-closed sandbox (default off)."""
+    value = os.environ.get("ZS_ALLOW_UNSANDBOXED", "0").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
 _SECURE_DEVNULL: Optional[str] = None
 
 
@@ -172,8 +178,18 @@ def _bwrap_usable() -> bool:
         _BWRAP_USABLE = False
         return False
     try:
+        # Probe the real flag set, not just --ro-bind: a host can pass the
+        # trivial probe and still fail on user namespaces or --cap-drop.
         result = subprocess.run(
-            [bwrap, "--ro-bind", "/", "/", "--", "/bin/true"],
+            [
+                bwrap,
+                "--die-with-parent",
+                "--unshare-all",
+                "--cap-drop", "ALL",
+                "--new-session",
+                "--ro-bind", "/", "/",
+                "--", "/bin/true",
+            ],
             capture_output=True,
             timeout=5,
             check=False,
@@ -220,25 +236,35 @@ def _sandboxed_argv(command: List[str], root: Path) -> List[str]:
     root (plus an ephemeral /tmp) is writable; /home and /root are masked
     with tmpfs so user secrets outside the workspace are not readable.
     Network: disabled by default (ZS_SANDBOX_NETWORK=1 to allow).
-    Namespace: a fresh PID namespace plus process cleanup on parent exit.
-    Falls back to the unsandboxed command when bubblewrap is unavailable.
+    Namespace: user, IPC, PID, UTS and cgroup namespaces are unshared, all
+    capabilities are dropped, and the session is detached from the parent.
+    Fail closed: a missing or unusable bubblewrap raises RuntimeError. Set
+    ZS_ALLOW_UNSANDBOXED=1 to fall back to an unsandboxed command instead.
     """
     if os.name == "nt":
         return list(command)
     bwrap = shutil.which("bwrap")
     if not bwrap:
-        # Silent degradation is undesirable; make it visible on stderr so
-        # operators know the advertised sandbox is inactive.
-        sys.stderr.write(
-            "workspace_mcp: bubblewrap not found; running command unsandboxed\n"
+        if _allow_unsandboxed():
+            sys.stderr.write(
+                "workspace_mcp: bubblewrap not found; running command unsandboxed\n"
+            )
+            return list(command)
+        raise RuntimeError(
+            "SECURITY FATAL: bubblewrap (bwrap) not found; unsandboxed execution is "
+            "disabled. Set ZS_ALLOW_UNSANDBOXED=1 to override."
         )
-        return list(command)
     if not _bwrap_usable():
-        sys.stderr.write(
-            "workspace_mcp: bubblewrap unusable in this environment; "
-            "running command unsandboxed\n"
+        if _allow_unsandboxed():
+            sys.stderr.write(
+                "workspace_mcp: bubblewrap unusable in this environment; "
+                "running command unsandboxed\n"
+            )
+            return list(command)
+        raise RuntimeError(
+            "SECURITY FATAL: bubblewrap is unusable in this environment (user namespaces "
+            "disabled or restricted). Set ZS_ALLOW_UNSANDBOXED=1 to override."
         )
-        return list(command)
     # A writable (regular-file) /dev/null: bwrap's --dev mount is nodev, so
     # device nodes cannot be opened O_RDWR, which breaks git and others.
     # Create it with O_EXCL|O_NOFOLLOW via mkstemp so a pre-existing symlink
@@ -246,12 +272,37 @@ def _sandboxed_argv(command: List[str], root: Path) -> List[str]:
     # host file.
     devnull_path = _secure_devnull()
     if not devnull_path:
-        return list(command)
-    argv: List[str] = [bwrap, "--die-with-parent", "--unshare-pid"]
-    network_disabled = not _sandbox_network_enabled()
-    if network_disabled and _bwrap_supports_unshare_net():
+        if _allow_unsandboxed():
+            sys.stderr.write(
+                "workspace_mcp: no secure /dev/null stand-in; "
+                "running command unsandboxed\n"
+            )
+            return list(command)
+        raise RuntimeError(
+            "SECURITY FATAL: could not create the sandbox /dev/null stand-in. "
+            "Set ZS_ALLOW_UNSANDBOXED=1 to override."
+        )
+    # Explicit namespaces instead of --unshare-all: the network namespace is
+    # the one operators may need to opt back in (ZS_SANDBOX_NETWORK=1), so it
+    # is added conditionally rather than implied.
+    argv: List[str] = [
+        bwrap,
+        "--die-with-parent",
+        "--unshare-user",
+        "--unshare-ipc",
+        "--unshare-pid",
+        "--unshare-uts",
+        "--unshare-cgroup",
+        "--cap-drop", "ALL",
+        "--new-session",
+    ]
+    if _sandbox_network_enabled():
+        sys.stderr.write(
+            "workspace_mcp: ZS_SANDBOX_NETWORK=1; network not isolated\n"
+        )
+    elif _bwrap_supports_unshare_net():
         argv.append("--unshare-net")
-    elif network_disabled:
+    else:
         sys.stderr.write(
             "workspace_mcp: bwrap --unshare-net unsupported; "
             "network not isolated\n"

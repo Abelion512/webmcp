@@ -147,6 +147,30 @@ def header_value(websocket: Any, name: str) -> Optional[str]:
     return value if isinstance(value, str) else None
 
 
+def host_allowed(host: Optional[str]) -> bool:
+    """Whether a WebSocket Host header may reach the loopback-only bridge.
+
+    Browser clients always send Host (HTTP/1.1) and Origin; native clients send
+    neither. A missing Host is therefore accepted here and left to the Origin
+    allowlist, which is the check that actually separates a web page from a
+    local process. When Host IS present it must be a loopback literal.
+    """
+    if not host:
+        return True
+    name = host.strip().lower()
+    if not name:
+        return True
+    if name.startswith("["):
+        # IPv6 literal, e.g. "[::1]:17613".
+        end = name.find("]")
+        if end == -1:
+            return False
+        name = name[1:end]
+    else:
+        name = name.split(":", 1)[0]
+    return name in ("127.0.0.1", "localhost", "::1")
+
+
 def presented_token(websocket: Any) -> Optional[str]:
     header_token = (header_value(websocket, "X-Bridge-Token") or "").strip()
     if header_token:
