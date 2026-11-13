@@ -6,12 +6,42 @@ import json
 import logging
 import os
 import re
+import secrets
 import signal
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+# Handshake policy (Origin allowlist, per-install token, token file handling)
+# lives in bridge_auth.py; the names are re-exported here because bridge.py is the
+# entry point and the tests configure auth through this module.
+from bridge_auth import (
+    ALLOWED_ORIGIN_PREFIXES,
+    AUTH_DISABLE_ENV,
+    AUTH_DISABLED_VALUES,
+    TOKEN_ENV,
+    TOKEN_PATH_ENV,
+    auth_disabled,
+    header_value,
+    load_auth_token,
+    origin_allowed,
+    presented_token,
+    token_matches,
+    token_path,
+    write_token_file,
+)
+
+# The four below are only re-exported: Linux_Start.sh --check and the tests reach
+# the auth policy through this module. Listing them keeps pyflakes (a no-dead-code
+# check in CI) able to see that the imports are deliberate.
+__all__ = [
+    "ALLOWED_ORIGIN_PREFIXES",
+    "AUTH_DISABLED_VALUES",
+    "TOKEN_PATH_ENV",
+    "auth_disabled",
+]
 
 try:
     import websockets
@@ -34,6 +64,16 @@ MAX_LOG_CHARS = 1000
 # Auto-recovery backoff for dead MCP subprocesses: 5s, 10s, 20s, ... capped.
 RESTART_BASE_DELAY_SECONDS = 5.0
 RESTART_MAX_DELAY_SECONDS = 300.0
+
+# An unpaired extension retries every few seconds, so repeat rejections are only
+# reported once per interval to keep bridge_debug.log readable.
+REJECT_LOG_INTERVAL = 60.0
+# Rotation must end the sessions that were authenticated with the old token, so
+# every live client is closed once the new token has been sent. 1012 ("service
+# restart") is a reconnect signal, not a pairing problem, so the extension does
+# not flash its pairing card for it.
+ROTATE_CLOSE_CODE = 1012
+ROTATE_CLOSE_REASON = "bridge token rotated; reconnect with the new token"
 
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
@@ -328,13 +368,17 @@ class MCPServer:
 
 
 class Bridge:
-    def __init__(self) -> None:
+    def __init__(self, token: Optional[str] = None) -> None:
         self.servers: Dict[str, MCPServer] = {}
         self.clients = set()
         self._client_lock = asyncio.Lock()
         self._catalog: List[Dict[str, Any]] = []
+        self._last_studio: Optional[bool] = None
         self.started_at = time.time()
         self.started_monotonic = time.monotonic()
+        self.token = token
+        self._reject_log: Dict[str, Tuple[float, int]] = {}
+        self._rotate_lock = asyncio.Lock()
 
     def load_config(self) -> Dict[str, Dict[str, Any]]:
         if not CONFIG_PATH.exists():
@@ -498,7 +542,97 @@ class Bridge:
         except Exception as error:
             log(f"bridge: failed to send to client: {error}")
 
+    async def revoke_clients(self) -> int:
+        """Close every authenticated connection so each one must re-handshake.
+
+        Used after a token rotation: a session that was authenticated with the
+        old secret must not stay open. 1012 ("service restart") tells the
+        extension this is a reconnect, not a pairing problem, so it keeps the
+        token it just saved and dials in again.
+        """
+        async with self._client_lock:
+            clients = list(self.clients)
+        if clients:
+            await asyncio.gather(
+                *(self._close_client(client) for client in clients),
+                return_exceptions=True,
+            )
+        return len(clients)
+
+    async def _close_client(self, client: Any) -> None:
+        try:
+            await client.close(code=ROTATE_CLOSE_CODE, reason=ROTATE_CLOSE_REASON)
+        except Exception:
+            pass
+
+    def _log_rejection(self, key: str, message: str) -> None:
+        """Log the first rejection, then at most one summary per interval."""
+        now = time.monotonic()
+        last, suppressed = self._reject_log.get(key, (0.0, 0))
+        if last and now - last < REJECT_LOG_INTERVAL:
+            self._reject_log[key] = (last, suppressed + 1)
+        else:
+            if suppressed:
+                message = f"{message} ({suppressed} more since the last report)"
+            log(message)
+            self._reject_log[key] = (now, 0)
+        # `key` can embed unauthenticated client data (e.g. a fresh Origin
+        # header per handshake from a hostile page); cap the map so it cannot
+        # grow without bound. Oldest entry first out.
+        if len(self._reject_log) > 64:
+            for stale in sorted(self._reject_log, key=self._reject_log.get)[: len(self._reject_log) - 64]:  # type: ignore[arg-type,union-attr]
+                self._reject_log.pop(stale, None)
+
+    def rotate_token(self, request_id: Any = None) -> Dict[str, Any]:
+        """Issue and persist a fresh token; the caller revokes the live sessions.
+
+        Rotation changes the value future handshakes must present. Once the reply
+        is on the wire, `_handle_request` closes every authenticated connection, so
+        no session outlives the old secret; the extension stores the new token and
+        reconnects with it by itself.
+        """
+        response: Dict[str, Any] = {"type": "token_rotated", "id": request_id}
+        if self.token is None:
+            return {**response, "ok": False, "error": f"token auth is disabled ({AUTH_DISABLE_ENV})"}
+        if (os.environ.get(TOKEN_ENV) or "").strip():
+            return {
+                **response,
+                "ok": False,
+                "error": f"the token is pinned by {TOKEN_ENV}; change that variable instead",
+            }
+        token = secrets.token_urlsafe(32)
+        path = token_path()
+        try:
+            write_token_file(path, token)
+        except OSError as error:
+            log(f"could not rotate the bridge token ({error})")
+            return {**response, "ok": False, "error": f"could not write {path}: {error}"}
+        self.token = token
+        log(f"bridge token rotated; the new token is saved to {path}")
+        return {**response, "ok": True, "token": token}
+
+    async def _reject_handshake(self, websocket: Any, reason: str) -> None:
+        try:
+            await websocket.close(code=1008, reason=reason)
+        except Exception:
+            pass
+
     async def handle_client(self, websocket: Any, _path: Optional[str] = None) -> None:
+        origin = header_value(websocket, "Origin")
+        if not origin_allowed(origin):
+            self._log_rejection(
+                f"origin:{origin}", f"rejected client from origin {origin!r}"
+            )
+            await self._reject_handshake(websocket, "origin not allowed")
+            return
+        if self.token:
+            presented = presented_token(websocket)
+            if not presented or not token_matches(presented, self.token):
+                self._log_rejection(
+                    "token", "rejected client with a missing or invalid bridge token"
+                )
+                await self._reject_handshake(websocket, "bridge token required")
+                return
         async with self._client_lock:
             self.clients.add(websocket)
         log("extension connected")
@@ -558,6 +692,19 @@ class Bridge:
                 response = {"type": "mcp_status", "id": request_id, "ok": False, "alive": False, "error": str(error)}
             await self._send_client(websocket, response)
             await self.broadcast(self._connected_message())
+        elif kind == "rotate_token":
+            # One rotation at a time: two overlapping rotations would each
+            # write a token and close sockets mid-flight, locking out the
+            # client that saved the first one.
+            async with self._rotate_lock:
+                response = self.rotate_token(request_id)
+                # Send the new token first: the client needs it before its socket
+                # goes away, and the extension saves it as soon as the reply
+                # arrives.
+                await self._send_client(websocket, response)
+                if response.get("ok"):
+                    revoked = await self.revoke_clients()
+                    log(f"revoked {revoked} authenticated connection(s) after the token rotation")
         elif kind == "add_server":
             await self._change_server(websocket, request, remove=False)
         elif kind == "remove_server":
@@ -618,11 +765,23 @@ class Bridge:
             for candidate in candidates:
                 if candidate.alive:
                     continue
+                # Respect the monitor's backoff here too: a crash-looping
+                # server must not get a fresh spawn attempt on every tool
+                # call, and failures must feed the backoff schedule.
+                if candidate.next_restart_at > time.monotonic():
+                    continue
                 log(f"[{candidate.server_id}] restarting before tool call {name}.")
                 if await candidate.start():
+                    candidate.next_restart_at = 0.0
                     server, tool_name = self._resolve_tool(name)
                     if server is not None:
                         break
+                else:
+                    delay = candidate.record_restart_failure()
+                    log(
+                        f"[{candidate.server_id}] restart failed; "
+                        f"backing off {delay:.0f}s before the next attempt."
+                    )
         # Isolation: the extension states which server is selected. The bridge refuses to
         # run a tool that belongs to any other server (requests without the field keep
         # the old behaviour).
@@ -773,7 +932,8 @@ async def run() -> None:
             "The 'websockets' package is required. Install it with "
             f"'{sys.executable} -m pip install websockets'."
         )
-    bridge = Bridge()
+    token, created = load_auth_token(log)
+    bridge = Bridge(token)
     server = await websockets.serve(
         bridge.handle_client,
         HOST,
@@ -784,6 +944,23 @@ async def run() -> None:
     )
     log(f"snapgent bridge v{BRIDGE_VERSION}")
     log(f"listening on ws://{HOST}:{PORT} - load the extension and open a supported AI chat")
+    if token:
+        if (os.environ.get(TOKEN_ENV) or "").strip():
+            log(f"auth: token required ({TOKEN_ENV}); origin allowlist enforced")
+        else:
+            log(f"auth: token required from {token_path()}; origin allowlist enforced")
+        if created:
+            # The token itself never goes into the log: bridge_debug.log is a
+            # world-readable file next to the workspace, and get_bridge_status
+            # tails it back to every paired client. The popup pairing flow
+            # reads the token from the token file, not from this message.
+            log(f"first run: paste this token into the Snapgent popup once (it is saved by the extension)")
+            log(f"bridge token saved to {token_path()}")
+    else:
+        log(
+            "WARNING: bridge token auth is disabled - any local process can call MCP tools. "
+            f"Unset {AUTH_DISABLE_ENV} and restart the bridge to require a token."
+        )
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
     async def _startup_then_monitor() -> None:
