@@ -49,6 +49,6 @@ ci:
 tests:
   - changed-files:
       - any-glob-to-any-file:
-          - test_*.py
-          - scripts/e2e_live.py
+          - tests/**
+          - e2e/**
           - snapgent-extension/test-*.js

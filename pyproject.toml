@@ -4,5 +4,7 @@
 # See docs/code-standards.md for the conventions behind these settings.
 
 [tool.pytest.ini_options]
-testpaths = ["."]
+testpaths = ["tests"]
 python_files = ["test_*.py"]
+# Repo root stays importable from tests/ (import bridge / workspace_mcp).
+pythonpath = ["."]

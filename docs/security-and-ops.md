@@ -125,7 +125,7 @@ ZS_BRIDGE_LOG_JSON=1 python3 bridge.py
 ```
 
 The bridge config path can be overridden with `ZS_BRIDGE_CONFIG`
-(default `config.json` next to `bridge.py`). `scripts/e2e_live.py`
+(default `config.json` next to `bridge.py`). `e2e/e2e_live.py`
 uses a temporary config this way, because `config.json` is gitignored
 and a CI checkout has no configured servers otherwise.
 
@@ -139,7 +139,7 @@ text format.
 | --- | --- | --- |
 | Python unit | `/usr/bin/python3 -m pytest -q` | workspace tools, symlink guard, `run_command` policy, bridge stdio, backoff, status |
 | Extension (Node) | `node snapgent-extension/test-parser.js` etc. | parser + provider DOM reading against a stub DOM, no npm install |
-| Live e2e | `/usr/bin/python3 scripts/e2e_live.py` | real bridge + real subprocess on an ephemeral port: tools, symlink, policy, write/edit/delete, kill → inline restart, kill → monitor restart |
+| Live e2e | `/usr/bin/python3 e2e/e2e_live.py` | real bridge + real subprocess on an ephemeral port: tools, symlink, policy, write/edit/delete, kill → inline restart, kill → monitor restart |
 
 GitHub Actions (`.github/workflows/tests.yml`) runs the Python and Node
 suites on every push/PR, plus the live e2e as a separate job. Path

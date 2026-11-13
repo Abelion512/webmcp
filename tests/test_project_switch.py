@@ -29,7 +29,8 @@ except ImportError:  # pragma: no cover - websockets is a dev requirement
     websockets = None
 
 
-ROOT = Path(__file__).resolve().parent
+# Repo root: this file lives in tests/.
+ROOT = Path(__file__).resolve().parent.parent
 
 # Captures the path each script resolved. The launchers call python3 for the
 # version check, websockets check, setup-config.py, and bridge.py; only the

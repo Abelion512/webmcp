@@ -7,7 +7,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 
-MODULE_PATH = Path(__file__).with_name("setup-config.py")
+# Repo root, not tests/: the module under test stays next to the bridge.
+MODULE_PATH = Path(__file__).resolve().parent.parent / "setup-config.py"
 SPEC = importlib.util.spec_from_file_location("setup_config", MODULE_PATH)
 setup_config = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(setup_config)

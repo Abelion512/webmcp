@@ -283,11 +283,13 @@ snapgent-full/
 ├── bridge_auth.py             # Handshake policy: origin allowlist, token file, rotation
 ├── requirements.txt           # Pinned websockets range for the bridge
 ├── workspace_mcp.py           # Workspace MCP server source (28 workspace tools)
-├── test_bridge.py             # MCP bridge protocol tests
-├── test_setup_config.py       # MCP setup helper tests
-├── test_workspace_mcp.py      # Workspace MCP server tests
-├── scripts/e2e_live.py        # Live e2e: real bridge + subprocess on an ephemeral port
-├── scripts/smoke_extension_live.py  # Live handshake/rotation smoke in headless Chrome
+├── tests/                     # Unit/protocol tests (pytest or unittest)
+│   ├── test_bridge.py         # MCP bridge protocol tests
+│   ├── test_setup_config.py   # MCP setup helper tests
+│   └── test_workspace_mcp.py  # Workspace MCP server tests
+├── e2e/                       # Live end-to-end scripts (need a real bridge/browser)
+│   ├── e2e_live.py            # Real bridge + subprocess on an ephemeral port
+│   └── smoke_extension_live.py  # Handshake/rotation smoke in headless Chrome
 └── sync-upstream.sh           # Sync with upstream, keeping purged paths deleted
 ```
 
@@ -310,10 +312,10 @@ are in [`docs/code-standards.md`](docs/code-standards.md).
 
 Tests: `/usr/bin/python3 -m pytest -q` (Python), `node
 snapgent-extension/test-*.js` (extension stub-DOM), and
-`/usr/bin/python3 scripts/e2e_live.py` (live bridge + subprocess).
+`/usr/bin/python3 e2e/e2e_live.py` (live bridge + subprocess).
 GitHub Actions runs the same suites on every push/PR. The pairing and rotation
 handshake needs a real browser, so it has its own manual smoke:
-`/usr/bin/python3 scripts/smoke_extension_live.py` (headless Chrome, throwaway
+`/usr/bin/python3 e2e/smoke_extension_live.py` (headless Chrome, throwaway
 bridge on ports 17613/9333).
 
 ---
