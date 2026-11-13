@@ -19,11 +19,18 @@ class WorkspaceMcpTests(unittest.TestCase):
         self.addCleanup(self.root_patch.stop)
         self.addCleanup(self.temp.cleanup)
 
-    def test_catalog_has_28_unique_tools(self):
+    def test_catalog_has_30_unique_tools(self):
         names = [tool["name"] for tool in workspace_mcp.TOOLS]
-        self.assertEqual(len(names), 28)
-        self.assertEqual(len(set(names)), 28)
-        for name in ("delete_file", "apply_patch", "git_add", "git_commit"):
+        self.assertEqual(len(names), 30)
+        self.assertEqual(len(set(names)), 30)
+        for name in (
+            "delete_file",
+            "apply_patch",
+            "git_add",
+            "git_commit",
+            "git_push",
+            "git_create_pr",
+        ):
             self.assertIn(name, names)
 
     def test_delete_file_refuses_unsafe_targets(self):
@@ -77,7 +84,7 @@ class WorkspaceMcpTests(unittest.TestCase):
 
     def test_tool_catalog_is_served_without_vscode(self):
         names = [tool["name"] for tool in workspace_mcp.TOOLS]
-        self.assertEqual(len(names), 28)
+        self.assertEqual(len(names), 30)
 
     def test_file_operations_stay_in_workspace(self):
         workspace_mcp.create_file("src/app.js", "export function start() {}\n")
@@ -164,6 +171,50 @@ class WorkspaceMcpTests(unittest.TestCase):
         # A bare string would otherwise be spread into one arg per character.
         with self.assertRaises(ValueError):
             workspace_mcp.run_command("echo", "hi")  # type: ignore[arg-type]
+
+    def test_git_push_refuses_default_branch(self):
+        with patch.object(
+            workspace_mcp, "get_root", return_value=self.workspace
+        ), patch.object(
+            workspace_mcp, "_host_process", side_effect=AssertionError("must not run")
+        ):
+            for branch in ("main", "master"):
+                with self.assertRaises(ValueError, msg=branch):
+                    workspace_mcp.git_push(branch)
+
+    def test_git_create_pr_refuses_default_head(self):
+        with patch.object(
+            workspace_mcp, "get_root", return_value=self.workspace
+        ), patch.object(
+            workspace_mcp, "_current_branch", return_value="main"
+        ), patch.object(
+            workspace_mcp, "_host_process", side_effect=AssertionError("must not run")
+        ):
+            with self.assertRaises(ValueError):
+                workspace_mcp.git_create_pr("title")
+
+    def test_git_push_rejects_option_injection(self):
+        with patch.object(workspace_mcp, "get_root", return_value=self.workspace):
+            with self.assertRaises(ValueError):
+                workspace_mcp.git_push("--upload-pack=evil")
+
+    def test_git_create_pr_requires_a_title(self):
+        with self.assertRaises(ValueError):
+            workspace_mcp.git_create_pr("   ")
+
+    def test_git_push_uses_current_branch_when_omitted(self):
+        calls = []
+        with patch.object(
+            workspace_mcp, "get_root", return_value=self.workspace
+        ), patch.object(
+            workspace_mcp, "_current_branch", return_value="feature/x"
+        ), patch.object(
+            workspace_mcp,
+            "_host_process",
+            side_effect=lambda command, timeout=0: calls.append(command) or "ok",
+        ):
+            workspace_mcp.git_push()
+        self.assertEqual(calls, [["git", "push", "-u", "origin", "feature/x"]])
 
     def test_run_process_does_not_retry_unsandboxed_for_command_errors(self):
         calls = []
