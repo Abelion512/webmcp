@@ -5,6 +5,7 @@ Run from the repo root: /usr/bin/python3 -m pytest tests/test_sandbox_hardening.
 
 import asyncio
 import subprocess
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -85,6 +86,63 @@ def test_git_works_inside_sandbox(tmp_path):
     assert "f.txt" in status
     workspace_mcp._run_process(["git", "commit", "-q", "-m", "init"], tmp_path, timeout=60)
 
+
+def test_stderr_returned_when_stdout_is_empty(tmp_path):
+    assert run_sandboxed("import sys; sys.stderr.write('warn')", tmp_path) == "warn"
+
+
+def test_stdout_wins_over_stderr(tmp_path):
+    out = run_sandboxed(
+        "import sys; sys.stdout.write('out'); sys.stderr.write('err')", tmp_path
+    )
+    assert out == "out"
+
+
+def test_failing_command_error_is_truncated(tmp_path):
+    with pytest.raises(RuntimeError) as excinfo:
+        run_sandboxed("import sys; sys.stdout.write('B'*500000); sys.exit(3)", tmp_path)
+    message = str(excinfo.value)
+    assert "status 3" in message
+    assert len(message) <= workspace_mcp.MAX_FILE_CHARS + 100
+
+
+def test_large_output_is_capped_without_full_buffering(tmp_path):
+    """A 200 MB payload must not be buffered whole before the cap is applied.
+
+    Before the streaming change the parent buffered the entire payload and
+    peaked near 80 MB for 20 MB of output; a capped drain stays flat.
+    """
+    driver = tmp_path / "driver.py"
+    driver.write_text(
+        "import resource, sys\n"
+        "sys.path.insert(0, sys.argv[2])\n"
+        "import workspace_mcp\n"
+        "out = workspace_mcp._run_process(\n"
+        "    ['/usr/bin/python3', '-c', \"import sys; sys.stdout.write('A'*200000000)\"],\n"
+        "    sys.argv[1], timeout=180,\n"
+        ")\n"
+        "print('LEN', len(out))\n"
+        "print('MAXRSS_KIB', resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)\n",
+        encoding="utf-8",
+    )
+    root = str(Path(workspace_mcp.__file__).parent)
+    result = subprocess.run(
+        [PYTHON, str(driver), str(tmp_path), root],
+        capture_output=True,
+        text=True,
+        timeout=240,
+        cwd=root,
+    )
+    assert result.returncode == 0, result.stderr
+    assert f"LEN {workspace_mcp.MAX_FILE_CHARS}" in result.stdout, result.stdout
+    rss_kib = int(
+        [line for line in result.stdout.splitlines() if line.startswith("MAXRSS_KIB")][0].split()[1]
+    )
+    # Uncapped buffering of 200 MB would peak far above this; a capped drain
+    # stays in the same range as the interpreter baseline.
+    assert rss_kib * 1024 < 60_000_000, (
+        f"peak RSS {rss_kib} KiB still buffered the whole payload"
+    )
 
 # ------------------------------------------------------------ fail-closed
 

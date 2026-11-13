@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -352,29 +353,70 @@ def _sandboxed_argv(command: List[str], root: Path) -> List[str]:
 
 
 def _run_process(command: List[str], root: Path, timeout: int = 30) -> str:
+    """Run a sandboxed command and return at most MAX_FILE_CHARS of output.
+
+    stdout/stderr are drained in capped chunks instead of being buffered whole,
+    so a runaway command cannot exhaust memory before the cap is applied.
+    """
     sandboxed = _sandboxed_argv(list(command), root)
-    result = subprocess.run(
+    process = subprocess.Popen(
         sandboxed,
         cwd=str(root),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         shell=False,
-        timeout=timeout,
-        check=False,
     )
+    lock = threading.Lock()
+    stored = {"bytes": 0}
+    stdout_chunks: List[bytes] = []
+    stderr_chunks: List[bytes] = []
+
+    def drain(stream: Any, sink: List[bytes]) -> None:
+        descriptor = stream.fileno()
+        while True:
+            try:
+                data = os.read(descriptor, 65536)
+            except OSError:
+                return
+            if not data:
+                return
+            with lock:
+                if stored["bytes"] >= MAX_FILE_CHARS:
+                    # Keep draining so the child cannot block on a full pipe.
+                    continue
+                keep = data[: MAX_FILE_CHARS - stored["bytes"]]
+                sink.append(keep)
+                stored["bytes"] += len(keep)
+
+    readers = [
+        threading.Thread(target=drain, args=(process.stdout, stdout_chunks), daemon=True),
+        threading.Thread(target=drain, args=(process.stderr, stderr_chunks), daemon=True),
+    ]
+    for reader in readers:
+        reader.start()
+    try:
+        returncode = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        process.kill()
+        process.wait()
+        raise RuntimeError(f"Command timed out after {timeout}s") from error
+    finally:
+        for reader in readers:
+            reader.join(timeout=5)
     # No unsandboxed retry here, ever: bwrap has already passed its
     # _bwrap_usable() probe by the time we get here, so a nonzero exit below
     # is the command's own result (an attacker-controlled stderr can say
     # "bwrap:" just as easily as a real setup failure can). Retrying outside
     # the sandbox would execute a failed command with full host access.
-    output = result.stdout.strip() or result.stderr.strip() or "(no output)"
-    if result.returncode:
+    stdout = b"".join(stdout_chunks).decode("utf-8", errors="replace").strip()
+    stderr = b"".join(stderr_chunks).decode("utf-8", errors="replace").strip()
+    output = stdout or stderr or "(no output)"
+    if returncode:
         raise RuntimeError(
-            f"Command exited with status {result.returncode}:\n{output[:MAX_FILE_CHARS]}"
+            f"Command exited with status {returncode}:\n{output[:MAX_FILE_CHARS]}"
         )
     return output[:MAX_FILE_CHARS]
+
 
 
 def get_workspace_info() -> Dict[str, Any]:
