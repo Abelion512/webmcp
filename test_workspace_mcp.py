@@ -1,4 +1,5 @@
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -160,6 +161,59 @@ class WorkspaceMcpTests(unittest.TestCase):
     def test_run_command_rejects_non_string_args(self):
         with self.assertRaises(ValueError):
             workspace_mcp.run_command("echo", [123])  # type: ignore[list-item]
+        # A bare string would otherwise be spread into one arg per character.
+        with self.assertRaises(ValueError):
+            workspace_mcp.run_command("echo", "hi")  # type: ignore[arg-type]
+
+    def test_run_process_does_not_retry_unsandboxed_for_command_errors(self):
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(argv)
+            return subprocess.CompletedProcess(
+                argv, 1, stdout="", stderr="Permission denied\n"
+            )
+
+        with patch.object(
+            workspace_mcp, "_sandboxed_argv", return_value=["bwrap", "--", "cat"]
+        ), patch.object(workspace_mcp.subprocess, "run", side_effect=fake_run):
+            with self.assertRaises(RuntimeError):
+                workspace_mcp._run_process(["cat"], self.workspace)
+        self.assertEqual(len(calls), 1)
+
+    def test_run_process_never_retries_unsandboxed_on_faked_bwrap_stderr(self):
+        # An attacker-controlled command can print "bwrap: ..." itself; the
+        # failed sandboxed result must surface as an error, never trigger a
+        # full-host re-run.
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(argv)
+            return subprocess.CompletedProcess(
+                argv, 1, stdout="", stderr="bwrap: setting up uid map: denied\n"
+            )
+
+        with patch.object(
+            workspace_mcp, "_sandboxed_argv", return_value=["bwrap", "--", "sh"]
+        ), patch.object(workspace_mcp.subprocess, "run", side_effect=fake_run):
+            with self.assertRaises(RuntimeError):
+                workspace_mcp._run_process(["sh"], self.workspace)
+        self.assertEqual(len(calls), 1)
+
+    def test_sandboxed_argv_binds_host_root_before_proc_and_dev(self):
+        argv = workspace_mcp._sandboxed_argv(["true"], Path("/tmp"))
+        self.assertTrue(argv[0].endswith("bwrap"))
+        root_bind = argv.index("--ro-bind")
+        proc = argv.index("--proc")
+        dev = argv.index("--dev")
+        # Host root first: fresh /proc and /dev mounts placed before it would
+        # be shadowed by the read-only root bind and leak host PIDs.
+        self.assertLess(root_bind, proc)
+        self.assertLess(proc, dev)
+        self.assertIn("--clearenv", argv)
+        self.assertIn("--tmpfs", argv)
+        # Secrets must not ride through: env is an explicit allowlist.
+        self.assertLess(argv.index("--clearenv"), argv.index("--setenv"))
 
 
 if __name__ == "__main__":

@@ -176,6 +176,41 @@ const ZS = (() => {
       skills = [],
     } = opts;
 
+    // Some sites impose a hard per-message character cap. Rudder rejects
+    // anything over 4,000 chars, while the full Roblox prompt is ~12k, so its
+    // provider asks for this condensed version. The vscode prompt is already
+    // short enough and keeps the full wording.
+    if (opts.compact && targetServer === "roblox") {
+      const compactPrompt = `CONTEXT: snapgentV3 is a browser extension running in this page. It reads your normal reply text, runs ONE snapgentV3 command against the user's selected MCP server through the local bridge, and sends you the result. Your own tools cannot reach the user's machine.
+
+Selected target: ${targetName} (server id: ${targetServer}).
+
+Start by calling list_commands with server "${targetServer}" to get the exact command names and parameters. Use only names and parameters from that result; never guess.
+
+Write exactly ONE command per reply in a fenced JSON block:
+${BT}json
+{"command":"exact_tool_name","params":{"key":"value"}}
+${BT}
+
+For execute_luau ONLY, use a fenced block with:
+${BT}
+###LUA###
+-- your Luau code
+###END_LUA###
+${BT}
+Bare ###LUA### runs in Edit mode. To run while the game is playing, use ###LUA:Server### or ###LUA:Client###. Use return (not print), give WaitForChild a timeout, and keep code short.
+
+RULES:
+- One command per turn; wait for its result before writing another.
+- Never claim success without a result. On ERROR, read it, fix the command, and continue.
+- Never say the bridge or Studio is offline without running a command on this turn.
+- Never delete or clear broadly without confirming the exact target with the user.
+- Do only what was asked. Finish with one short plain-text sentence; no code fences in the final answer.`;
+      return `${SYS_MARKER}\n${compactPrompt}` +
+        (providerNotes ? `\n\n${providerNotes.trim()}` : "") +
+        (customPrompt ? `\n\nUser's Custom prompt:\n${customPrompt.trim()}` : "");
+    }
+
     if (targetServer !== "roblox") {
       const prompt = `CONTEXT: snapgentV3 is a browser extension that sends your plain-text JSON commands to the user's selected MCP server through their local bridge. The selected target is ${targetName} (server id: ${targetServer}).
 

@@ -95,6 +95,7 @@
     { name: "Ptero", url: "https://ptero.pro/" },
     { name: "Grok", url: "https://grok.com/" },
     { name: "Mistral", url: "https://chat.mistral.ai/code" },
+    { name: "Rudder", url: "https://rudder.chat/chat" },
   ];
   const TARGET_STORAGE_KEY = "zsSelectedMcpTarget";
   let selectedTargetId = "vscode";
@@ -1024,6 +1025,12 @@
       if (!scoped.length) {
         return `Output of '${name}':\nERROR: the selected server "${requested}" has no commands available (it may be offline). Do NOT try other servers; tell the user to check the target in the snapgentV3 selector.`;
       }
+      // Providers with a small per-message cap (Rudder: 4,000 chars) ask for the
+      // compact catalogue. The detailed schemas and per-command notes blow past
+      // that cap, and a rejected boot message would strand the whole session.
+      if (P.compactToolList) {
+        return `Output of '${name}':\n${requested} commands (${scoped.length}):\n\n${ZS.compactTools(scoped)}`;
+      }
       const lines = scoped.map((t) => {
         const props = (t.inputSchema && t.inputSchema.properties) || {};
         const req = new Set((t.inputSchema && t.inputSchema.required) || []);
@@ -1851,6 +1858,7 @@
       targetServer: selectedTargetId,
       targetName: ui.getTargetName(),
       skills: workspaceSkills,
+      compact: !!P.compactPrompt,
     });
   }
 

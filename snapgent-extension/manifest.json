@@ -21,6 +21,7 @@
     "https://ptero.pro/*",
     "https://grok.com/*",
     "https://chat.mistral.ai/*",
+    "https://rudder.chat/*",
     "http://127.0.0.1/*",
     "ws://127.0.0.1/*"
   ],
@@ -111,6 +112,12 @@
     {
       "matches": ["https://chat.mistral.ai/*"],
       "js": ["core/config.js", "core/parser.js", "providers/mistral.js", "core/main.js"],
+      "css": ["overlay.css"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://rudder.chat/*"],
+      "js": ["core/config.js", "core/parser.js", "providers/rudder.js", "core/main.js"],
       "css": ["overlay.css"],
       "run_at": "document_idle"
     },

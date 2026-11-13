@@ -400,8 +400,11 @@ class Bridge:
                 }
             )
 
-    def _server_status(self) -> List[Dict[str, Any]]:
+    def _server_status(
+        self, snapshot: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
         now = time.monotonic()
+        entries = self.servers if snapshot is None else snapshot
         return [
             {
                 "id": server.server_id,
@@ -415,7 +418,7 @@ class Bridge:
                 if server.next_restart_at > now
                 else 0.0,
             }
-            for server in self.servers.values()
+            for server in entries.values()
         ]
 
     @staticmethod
@@ -437,21 +440,34 @@ class Bridge:
 
     def _log_tail(self, lines: int = 30) -> List[str]:
         try:
-            with LOG_PATH.open(encoding="utf-8", errors="replace") as handle:
-                tail = handle.readlines()[-lines:]
+            with LOG_PATH.open("rb") as handle:
+                # Read at most the last 64 KiB: the log grows without bound
+                # over a long session and the extension polls this every few
+                # seconds; slurping the whole file would spike RAM per poll.
+                handle.seek(0, os.SEEK_END)
+                size = handle.tell()
+                handle.seek(max(0, size - 64 * 1024))
+                tail = handle.read().decode("utf-8", errors="replace").splitlines()[-lines:]
         except OSError:
             return []
-        return [line.rstrip("\n")[:MAX_LOG_CHARS] for line in tail]
+        return [line[:MAX_LOG_CHARS] for line in tail]
 
-    def get_bridge_status(self, log_tail: Optional[List[str]] = None) -> Dict[str, Any]:
+    def get_bridge_status(
+        self,
+        log_tail: Optional[List[str]] = None,
+        snapshot: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """Diagnostic snapshot: bridge, clients, subprocesses, RAM, log tail.
 
         Served as the `get_bridge_status` bridge request (not a workspace
         tool: the workspace subprocess cannot see bridge clients/PIDs).
+        `snapshot` pins the server table taken on the event loop thread so a
+        concurrent restart/add cannot mutate the dict mid-iteration in the
+        worker thread.
         """
         now = time.monotonic()
         servers = []
-        for entry in self._server_status():
+        for entry in self._server_status(snapshot):
             pid = entry.get("pid")
             servers.append({**entry, "rss_kib": self._pid_rss_kib(pid)})
         return {
@@ -534,8 +550,12 @@ class Bridge:
                 },
             )
         elif kind == "get_bridge_status":
-            # Log file read is blocking I/O: run it off the event loop.
-            status = await asyncio.to_thread(self.get_bridge_status)
+            # Snapshot on the event loop thread: _server_status runs in the
+            # worker thread below, where a concurrent restart/add_server could
+            # mutate self.servers mid-iteration.
+            status = await asyncio.to_thread(
+                self.get_bridge_status, None, dict(self.servers)
+            )
             await self._send_client(
                 websocket,
                 {"type": "bridge_status", "id": request_id, "status": status},
@@ -750,7 +770,11 @@ class Bridge:
                 if not isinstance(env, dict) or not all(isinstance(k, str) for k in env):
                     raise RuntimeError("MCP server env must be an object.")
                 servers[server_id] = {"command": command, "args": args, "env": env}
-            temp_path = CONFIG_PATH.with_suffix(".json.tmp")
+            # Unique temp name per write: two tabs firing add_server at once
+            # must not interleave into the same temp file.
+            temp_path = CONFIG_PATH.with_name(
+                f"{CONFIG_PATH.name}.{os.getpid()}.{time.time_ns()}.tmp"
+            )
             temp_path.write_text(json.dumps(config, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
             temp_path.replace(CONFIG_PATH)
             await self.stop_servers()
@@ -774,10 +798,18 @@ async def run() -> None:
             f"'{sys.executable} -m pip install websockets'."
         )
     bridge = Bridge()
+    # Defend against Cross-Site WebSocket Hijacking: only the extension (and
+    # non-browser/local clients that send no Origin) may connect. A web page
+    # cannot spoof the Origin header, so this blocks drive-by RCE via the
+    # local bridge. Any extension ID is accepted (unpacked installs derive a
+    # different ID per machine); cross-origin WS access by a hostile extension
+    # is finally gated by the bridge token handshake, not by this list.
+    allowed_origins = [None, re.compile(r"chrome-extension://.*"), re.compile(r"moz-extension://.*")]
     server = await websockets.serve(
         bridge.handle_client,
         HOST,
         PORT,
+        origins=allowed_origins,
         max_size=50 * 1024 * 1024,
         ping_interval=20,
         ping_timeout=20,

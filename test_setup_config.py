@@ -33,6 +33,41 @@ class SetupConfigTests(unittest.TestCase):
         with patch.object(setup_config.sys, "platform", "darwin"):
             self.assertEqual(setup_config.main(), 1)
 
+    def test_root_override_wins_over_environment(self):
+        with tempfile.TemporaryDirectory() as temp_dir, tempfile.TemporaryDirectory() as other:
+            config_path = Path(temp_dir) / "config.json"
+            with patch.object(setup_config.sys, "platform", "linux"), patch.object(
+                setup_config, "CONFIG_PATH", config_path
+            ), patch.dict(
+                os.environ, {"ZS_WORKSPACE_ROOT": temp_dir}, clear=False
+            ):
+                result = setup_config.main(other)
+            self.assertEqual(result, 0)
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            config["mcpServers"]["repo"]["env"]["ZS_WORKSPACE_ROOT"],
+            str(Path(other).resolve()),
+        )
+
+    def test_missing_workspace_root_is_refused(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.json"
+            missing = Path(temp_dir) / "missing"
+            with patch.object(setup_config.sys, "platform", "linux"), patch.object(
+                setup_config, "CONFIG_PATH", config_path
+            ):
+                self.assertEqual(setup_config.main(str(missing)), 1)
+            self.assertFalse(config_path.exists())
+
+    def test_empty_root_override_is_refused(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.json"
+            with patch.object(setup_config.sys, "platform", "linux"), patch.object(
+                setup_config, "CONFIG_PATH", config_path
+            ):
+                self.assertEqual(setup_config.main(""), 1)
+            self.assertFalse(config_path.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
