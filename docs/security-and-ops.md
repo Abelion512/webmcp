@@ -55,6 +55,34 @@ legitimate workspace operation.
 Real isolation for untrusted work is a separate OS user, container, or
 VM — not this denylist.
 
+## Sandbox (`bubblewrap`)
+
+`run_command`, the `git_*` helpers, `run_project_script` and `run_tests` all
+execute inside `bubblewrap` when it is usable on the host (`workspace_mcp.py`):
+
+- **Namespaces:** user, IPC, PID, UTS and cgroup are unshared; the network
+  namespace is unshared unless `ZS_SANDBOX_NETWORK=1`.
+- **Capabilities:** every Linux capability is dropped (`--cap-drop ALL`).
+- **Filesystem:** the host root is bind-mounted read-only and only the
+  workspace root plus an ephemeral `/tmp` are writable. `/home`, `/root`,
+  `/mnt` and `/media` are masked with tmpfs, and the environment is an explicit
+  allowlist (`--clearenv`), so host secrets and the bridge token never reach
+  the command.
+- **Lifetime:** `--die-with-parent` and `--new-session`.
+
+**Fail closed.** A missing or unusable `bwrap` raises instead of falling back
+to unsandboxed execution. `ZS_ALLOW_UNSANDBOXED=1` restores the old unsandboxed
+fallback for hosts where unprivileged user namespaces are disabled — without it
+every sandboxed tool would simply be dead there.
+
+`_bwrap_usable()` probes the real flag set (`--unshare-all --cap-drop ALL
+--new-session`), not a trivial `--ro-bind`, so a host that only appears to work
+cannot silently disable the sandbox.
+
+Output is drained in capped chunks (200 KB) rather than buffered whole, so a
+runaway command cannot exhaust memory before the cap is applied; a command that
+keeps producing output past its `timeout` is killed.
+
 ## Bridge handshake auth
 
 The bridge listens on loopback, but any local process and any web page can reach
