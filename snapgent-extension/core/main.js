@@ -136,7 +136,15 @@
   // NEXT waitVisible() of a running session without a page reload.
   function setBackgroundSessions(on) {
     backgroundSessions = on === true;
-    try { chrome.storage.local.set({ [BACKGROUND_SESSIONS_KEY]: backgroundSessions }); } catch {}
+    try {
+      chrome.storage.local.set({ [BACKGROUND_SESSIONS_KEY]: backgroundSessions }, () => {
+        // Chrome reports storage failures through lastError, not a throw.
+        const error = chrome.runtime && chrome.runtime.lastError;
+        if (error) diag("backgroundSessions.persistFailed", { message: error.message || String(error) });
+      });
+    } catch (error) {
+      diag("backgroundSessions.persistFailed", { message: String(error) });
+    }
     return backgroundSessions;
   }
 
@@ -699,7 +707,11 @@
             await sleep(200);
             continue;
           }
-        } catch {}
+        } catch (error) {
+          // The fallback marker could not be read; keep the warmup path but
+          // make the failure visible instead of swallowing it.
+          diag("empty.why", { branch: "fallbackTurnError", message: String(error) });
+        }
         if (!warmSince) warmSince = Date.now();
         if (Date.now() - warmSince < WARMUP_MS) { await sleep(200); continue; }
         diag("empty.why", { branch: "warmup", rep: (d.reply||"").length, lastGood: lastGoodReply.length });
