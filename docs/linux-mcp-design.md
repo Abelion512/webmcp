@@ -48,7 +48,7 @@ Out of scope:
 
 ### 1. `workspace_mcp.py`
 
-MCP stdio server, protocol `2024-11-05`, 28 tools unchanged (read, write, edit,
+MCP stdio server, protocol `2024-11-05`, 30 tools (read, write, edit,
 search, git). One change in behavior:
 
 - The workspace root comes from `ZS_WORKSPACE_ROOT` (falling back to
@@ -138,7 +138,7 @@ Existing suites, kept green: `test_bridge.py`, `test_setup_config.py`,
 
 New assertions:
 
-- `workspace_mcp`: `tools/list` returns 28 tools with no VS Code present.
+- `workspace_mcp`: `tools/list` returns 30 tools with no VS Code present.
 - `workspace_mcp`: `get_root()` raises when `ZS_WORKSPACE_ROOT` is unset.
 - `setup-config`: writes a `repo` entry carrying `ZS_WORKSPACE_ROOT`.
 - `bridge`: no `studio_status` in the request dispatch table.

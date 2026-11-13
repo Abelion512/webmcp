@@ -11,7 +11,7 @@
 
 ## Targets verified
 
-- `repo`: 28 tools (stable Python MCP server, no npx dependency)
+- `repo`: 30 tools (stable Python MCP server, no npx dependency)
 - Bridge endpoint: `ws://127.0.0.1:17613`
 
 ## Client configuration

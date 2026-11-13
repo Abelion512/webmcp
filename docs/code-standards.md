@@ -25,7 +25,7 @@ review checklist that applies these sources at merge time.
 ```text
 bridge.py                  WebSocket bridge (asyncio subprocess supervisor)
 bridge_auth.py             Handshake policy: origin allowlist, token file, rotation
-workspace_mcp.py           Workspace MCP server (28 tools, stdio)
+workspace_mcp.py           Workspace MCP server (30 tools, stdio)
 setup-config.py            Writes config.json (Linux only)
 tests/test_*.py            Python unit tests (stdlib unittest style; pytest config in pyproject.toml)
 e2e/e2e_live.py             Live e2e: real bridge + subprocess, ephemeral port
@@ -104,7 +104,7 @@ Rules:
   scripts live in their own folders so the root lists only shippable code.
   `python -m pytest -q` from the root works via `pythonpath = ["."]` in
   `pyproject.toml`; `python -m unittest discover -s tests` works via `python -m`.
-- **Line length ~100, not 79/80.** The 28-tool catalog is written as
+- **Line length ~100, not 79/80.** The 30-tool catalog is written as
   one `_tool(...)` per line for scanability; PEP 8 itself says
   consistency within a module wins. New code should stay ≤100.
 - **Large files exist.** `core/main.js` (~4.8k lines) is the known

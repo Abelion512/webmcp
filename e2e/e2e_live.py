@@ -118,22 +118,22 @@ async def run_checks(port, token):
                     ws = None
                 await asyncio.sleep(0.5)
                 continue
-            if len(conn.get("tools", [])) == 28:
+            if len(conn.get("tools", [])) == 30:
                 break
             await ws.close()
             ws = None
             await asyncio.sleep(0.5)
         if ws is None or conn is None:
-            check("connected_28_tools", False, "no connection with 28 tools in 15s")
+            check("connected_30_tools", False, "no connection with 30 tools in 15s")
             return
         async with ws:
-            check("connected_28_tools",
-                  conn.get("type") == "connected" and len(conn.get("tools", [])) == 28,
+            check("connected_30_tools",
+                  conn.get("type") == "connected" and len(conn.get("tools", [])) == 30,
                   f"{len(conn.get('tools', []))} tools")
 
             tools = await rpc(ws, 1, {"type": "list_tools"})
             check("list_tools", tools.get("type") == "tools"
-                  and len(tools.get("tools", [])) == 28)
+                  and len(tools.get("tools", [])) == 30)
 
             st = await rpc(ws, 2, {"type": "get_bridge_status"})
             s = st["status"]
@@ -280,7 +280,7 @@ async def run_checks(port, token):
                 cur = st["status"]["servers"][0]
                 if (
                     cur["alive"] and cur["ready"] and cur["pid"]
-                    and cur["pid"] != pid2 and cur["tools"] == 28
+                    and cur["pid"] != pid2 and cur["tools"] == 30
                 ):
                     pid3 = cur["pid"]
                     break

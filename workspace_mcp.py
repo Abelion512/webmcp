@@ -33,6 +33,9 @@ BLOCKED_COMMANDS = {
     "dd", "mkfs", "mkfs.ext4", "mkfs.xfs", "mkfs.btrfs", "mkfs.vfat",
     "fdisk", "parted", "shutdown", "reboot", "halt", "poweroff", "init",
 }
+# The default branch is never pushed or used as a PR head: every change goes
+# through a feature branch and a pull request.
+DEFAULT_BRANCHES = ("main", "master")
 MAX_COMMAND_TIMEOUT = 300
 MIN_COMMAND_TIMEOUT = 5
 DEFAULT_COMMAND_TIMEOUT = 30
@@ -712,6 +715,102 @@ def git_commit(message: str) -> str:
     return _run_process(["git", "commit", "-m", message.strip()], get_root(), timeout=120)
 
 
+def _host_process(command: List[str], timeout: int = 120) -> str:
+    """Run a command on the HOST with the operator's environment (unsandboxed).
+
+    Privileged path for the two operations the bubblewrap sandbox cannot do:
+    pushing to a remote and opening a pull request both need network egress and
+    the user's git/gh credentials, which the sandbox removes (--unshare-net,
+    HOME on a tmpfs). Only the git push/PR helpers call this.
+    """
+    root = get_root()
+    result = subprocess.run(
+        command,
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        shell=False,
+        timeout=timeout,
+        check=False,
+    )
+    output = result.stdout.strip() or result.stderr.strip() or "(no output)"
+    if result.returncode:
+        raise RuntimeError(
+            f"Command exited with status {result.returncode}:\n{output[:MAX_FILE_CHARS]}"
+        )
+    return output[:MAX_FILE_CHARS]
+
+
+def _current_branch() -> str:
+    return _host_process(["git", "rev-parse", "--abbrev-ref", "HEAD"]).strip()
+
+
+def _has_upstream(branch: str) -> bool:
+    result = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", f"{branch}@{{u}}"],
+        cwd=str(get_root()),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def _require_feature_branch(branch: str) -> None:
+    if branch in DEFAULT_BRANCHES:
+        raise ValueError(
+            f"Refusing to push or open a PR from the default branch {branch!r}; "
+            "create a feature branch first."
+        )
+
+
+def _branch_arg(branch: str) -> str:
+    if not branch or branch.startswith("-") or any(
+        ch in branch for ch in " \t\n\r;&|<>$`\\"
+    ):
+        raise ValueError(f"illegal branch name: {branch!r}")
+    return branch
+
+
+def git_push(branch: str = "") -> str:
+    """Push a feature branch to origin. The default branch is refused."""
+    target = _branch_arg(branch.strip()) if branch.strip() else _current_branch()
+    # A detached HEAD reports as "HEAD", not "", so an empty check alone would
+    # let `git push -u origin HEAD` create a remote branch literally named HEAD.
+    if not target or target == "HEAD":
+        raise ValueError(
+            "refusing to push a detached HEAD; check out a feature branch first."
+        )
+    _require_feature_branch(target)
+    return _host_process(["git", "push", "-u", "origin", target], timeout=300)
+
+
+def git_create_pr(title: str, body: str = "", base: str = "") -> str:
+    """Open a pull request with gh. The default branch cannot be the head."""
+    if not isinstance(title, str) or not title.strip():
+        raise ValueError("PR title cannot be empty.")
+    head = _current_branch()
+    if head == "HEAD":
+        raise ValueError(
+            "refusing to open a PR from a detached HEAD; "
+            "check out a feature branch first."
+        )
+    _require_feature_branch(head)
+    if not _has_upstream(head):
+        git_push(head)
+    command = ["gh", "pr", "create", "--title", title.strip(), "--head", head]
+    if isinstance(body, str) and body.strip():
+        command += ["--body", body.strip()]
+    if isinstance(base, str) and base.strip():
+        command += ["--base", _branch_arg(base.strip())]
+    return _host_process(command, timeout=120)
+
+
+
+
 def run_command(
     command: str,
     args: Optional[List[str]] = None,
@@ -838,6 +937,8 @@ TOOLS = [
     _tool("apply_patch", "Apply several exact text replacements to one file; each old_text must match exactly once and nothing is written if any edit fails.", {"path": STR, "edits": {"type": "array", "items": {"type": "object", "properties": {"old_text": STR, "new_text": STR}, "required": ["old_text", "new_text"]}}}, ["path", "edits"]),
     _tool("git_add", "Stage specific workspace paths; staging the whole workspace is refused.", {"paths": {"type": "array", "items": STR}}, ["paths"]),
     _tool("git_commit", "Commit the currently staged changes with a message; no auto-staging and no amend.", {"message": STR}, ["message"]),
+    _tool("git_push", "Push a feature branch to origin with -u; the default branch (main/master) is refused.", {"branch": STR}),
+    _tool("git_create_pr", "Open a pull request with gh; the default branch cannot be the head. Pushes first when the branch has no upstream.", {"title": STR, "body": STR, "base": STR}, ["title"]),
 ]
 
 
@@ -871,6 +972,10 @@ def tool_dispatch(name: str, args: Dict[str, Any]) -> Any:
         "apply_patch": lambda: apply_patch(args["path"], args["edits"]),
         "git_add": lambda: git_add(args["paths"]),
         "git_commit": lambda: git_commit(args["message"]),
+        "git_push": lambda: git_push(args.get("branch", "")),
+        "git_create_pr": lambda: git_create_pr(
+            args["title"], args.get("body", ""), args.get("base", "")
+        ),
     }
     handler = handlers.get(name)
     if handler is None:

@@ -282,7 +282,7 @@ snapgent-full/
 ├── bridge.py                  # Cross-platform Python MCP bridge
 ├── bridge_auth.py             # Handshake policy: origin allowlist, token file, rotation
 ├── requirements.txt           # Pinned websockets range for the bridge
-├── workspace_mcp.py           # Workspace MCP server source (28 workspace tools)
+├── workspace_mcp.py           # Workspace MCP server source (30 workspace tools)
 ├── tests/                     # Unit/protocol tests (pytest or unittest)
 │   ├── test_bridge.py         # MCP bridge protocol tests
 │   ├── test_setup_config.py   # MCP setup helper tests
@@ -303,6 +303,10 @@ from outside the root. `run_command` blocks privilege-escalation and
 raw-disk binaries and caps its timeout at 300 s. The bridge restarts
 dead MCP servers with exponential backoff, and answers
 `get_bridge_status` with per-server pid, restart attempts, and RSS.
+
+`git_push` and `git_create_pr` run on the host (the sandbox has no network
+egress and no `gh` credentials) and refuse `main`/`master`, so every change
+travels through a feature branch and a pull request.
 
 Start with [`docs/security-and-ops.md`](docs/security-and-ops.md) for
 the containment model, the `run_command` policy, bridge recovery, and
