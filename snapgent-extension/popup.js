@@ -107,8 +107,27 @@ function render(s) {
   servers.textContent = s.connected ? serverLines(s, list).join("\n") : "";
 }
 
+// Set once per popup load, so a bridge that keeps refusing cannot loop.
+let unparkedOnce = false;
+
+// A parked extension waits for a token the bridge may no longer want: it was
+// restarted, or re-run without `ZS_BRIDGE_AUTH=strict`. Opening the popup is
+// the moment the user is looking, so try once instead of leaving a stale
+// `Bridge token required` until they find the Reconnect button.
+function shouldUnpark(status) {
+  return !unparkedOnce && !!(status && status.authRequired && !status.connected);
+}
+
 function refresh() {
-  chrome.runtime.sendMessage({ type: "status" }, (s) => s && render(s));
+  chrome.runtime.sendMessage({ type: "status" }, (s) => {
+    if (!s) return;
+    if (shouldUnpark(s)) {
+      unparkedOnce = true;
+      chrome.runtime.sendMessage({ type: "reconnect" }, () => setTimeout(refresh, 800));
+      return;
+    }
+    render(s);
+  });
 }
 
 onClick("reconnect", () => {

@@ -27,7 +27,7 @@ const popupSrc = fs.readFileSync(__dirname + "/popup.js", "utf8");
 // popup.js has no exports; evaluate it and capture render() from closure scope.
 // Safe here: the evaluated string is this repo's own popup.js read from disk
 // (same pattern as test-parser.js/test-chatgpt.js), never user input.
-const render = new Function(popupSrc + "; return render;")();
+const { render, shouldUnpark } = new Function(popupSrc + "; return { render, shouldUnpark };")();
 
 const ok = (name, cond) => {
   console.log((cond ? "PASS" : "FAIL") + "  " + name);
@@ -73,3 +73,13 @@ ok("old-bridge fallback renders legacy line",
 render({ ...base, connected: false, bridgeStatus: null });
 ok("offline state", elements.state.textContent === "Bridge offline"
   && elements.servers.textContent === "");
+
+// 5. Unpark policy: only a parked, still-refusing bridge is retried, and
+// only once per popup load.
+ok("a parked bridge is retried once the popup opens",
+  shouldUnpark({ authRequired: true, connected: false }) === true);
+ok("a connected bridge is not retried",
+  shouldUnpark({ authRequired: true, connected: true }) === false);
+ok("a bridge that is merely offline is not retried",
+  shouldUnpark({ authRequired: false, connected: false }) === false);
+ok("a missing status is not retried", shouldUnpark(null) === false);
