@@ -1074,6 +1074,9 @@ def build_a2a_server(bridge: "Bridge", loop: asyncio.AbstractEventLoop) -> Any:
     if not token:
         token, token_created = load_or_create_token(a2a_token_path(), "A2A token", log)
         token = token or secrets.token_urlsafe(32)
+        if token_created:
+            # Path only, never the value: bridge_debug.log is world-readable.
+            log(f"A2A token created at {a2a_token_path()}")
 
     def submit(prompt: str, task_timeout: float) -> Dict[str, Any]:
         future = asyncio.run_coroutine_threadsafe(bridge.submit_prompt(prompt, task_timeout), loop)
