@@ -59,6 +59,18 @@ All notable changes to snapgentV3 Free are documented here.
   and `test-popup-status.js`. One pre-existing unused import removed.
 
 ### Changed
+- **Pairing needs no copy-paste.** The bridge now accepts a browser extension on the
+  Origin allowlist alone, so the popup connects on its own instead of asking for the
+  per-install token. A web page still cannot reach the bridge (it cannot forge a
+  `chrome-extension://` Origin), and a client that sends no `Origin` — a script or
+  another local tool — still has to present the token from `~/.snapgent/bridge_token`,
+  because the bridge cannot tell one local process from another. The old rule is
+  still available as `ZS_BRIDGE_AUTH=strict`. Pairing instructions in `README.md`,
+  `docs/linux-stability.md` and `docs/security-and-ops.md` were rewritten to match.
+- **The A2A bearer token is kept in a file** (`~/.snapgent/a2a_token`, mode `600`,
+  reused across restarts) instead of only being printed, so a local agent reads it
+  rather than copying the value out of the bridge window. `ZS_A2A_TOKEN` still pins
+  an exact value and `ZS_A2A_TOKEN_FILE` moves the file.
 - **MCP server renamed:** `vscode_mcp.py` is now `workspace_mcp.py`, a generic
   stdio MCP file server scoped to one directory.
 - **Explicit workspace root:** the server no longer auto-detects a VS Code

@@ -29,6 +29,10 @@ TOKEN_ENV = "ZS_BRIDGE_TOKEN"
 TOKEN_PATH_ENV = "ZS_BRIDGE_TOKEN_FILE"
 AUTH_DISABLE_ENV = "ZS_BRIDGE_AUTH"  # set to 0/off/false/no to run without a token
 AUTH_DISABLED_VALUES = {"0", "off", "false", "no"}
+# The same switch doubles as a mode selector: `strict` keeps the old rule
+# where every client presents the token, extensions included. See
+# token_required_for.
+STRICT_VALUE = "strict"
 
 # None means "stay quiet": the bridge passes its own logger in, tests do not.
 LogFn = Optional[Callable[[str], None]]
@@ -41,8 +45,41 @@ def token_path() -> Path:
     return Path.home() / ".snapgent" / "bridge_token"
 
 
+def a2a_token_path() -> Path:
+    """Where the A2A bearer token is kept.
+
+    A local agent reads it from here instead of copying it out of the bridge
+    window. 0600 in a 0700 directory, like the bridge token.
+    """
+    override = (os.environ.get("ZS_A2A_TOKEN_FILE") or "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".snapgent" / "a2a_token"
+
+
 def auth_disabled() -> bool:
     return (os.environ.get(AUTH_DISABLE_ENV) or "").strip().lower() in AUTH_DISABLED_VALUES
+
+
+def strict_auth() -> bool:
+    return (os.environ.get(AUTH_DISABLE_ENV) or "").strip().lower() == STRICT_VALUE
+
+
+def token_required_for(origin: Optional[str]) -> bool:
+    """Whether this client has to present the bridge token.
+
+    A browser extension cannot exist without the user installing it, and a
+    web page cannot forge a `chrome-extension://` Origin, so the allowlist
+    above already covers that case - which is what makes pairing
+    copy-paste-free. A native client sends no Origin, so the bridge cannot
+    tell it apart from any other local process and it must prove it holds
+    the token.
+
+    `ZS_BRIDGE_AUTH=strict` requires the token from every client again.
+    """
+    if strict_auth():
+        return True
+    return not (origin or "").startswith(ALLOWED_ORIGIN_PREFIXES)
 
 
 def _notify(log_fn: LogFn, message: str) -> None:
@@ -67,21 +104,20 @@ def _create_private_file(path: Path, token: str) -> None:
         stream.write(token + "\n")
 
 
-def load_auth_token(log_fn: LogFn = None) -> Tuple[Optional[str], bool]:
-    """Return (token, created). A token of None means auth is turned off."""
-    if auth_disabled():
-        return None, False
-    env_token = (os.environ.get(TOKEN_ENV) or "").strip()
-    if env_token:
-        return env_token, False
+def load_or_create_token(
+    path: Path, label: str, log_fn: LogFn = None
+) -> Tuple[Optional[str], bool]:
+    """Read `path`, or create it with a fresh secret. Returns (token, created).
 
-    path = token_path()
+    A token of None means the file could be neither read nor written; the
+    caller decides what that means for the auth mode it is serving.
+    """
     try:
         existing = path.read_text(encoding="utf-8").strip()
     except FileNotFoundError:
         existing = ""
     except OSError as error:
-        _notify(log_fn, f"WARNING: could not read the bridge token ({error}); token auth is off.")
+        _notify(log_fn, f"WARNING: could not read the {label} ({error}).")
         return None, False
     if existing:
         return existing, False
@@ -90,15 +126,31 @@ def load_auth_token(log_fn: LogFn = None) -> Tuple[Optional[str], bool]:
     try:
         _create_private_file(path, token)
     except FileExistsError:
-        # Another bridge won the first-run race; use the token it wrote.
+        # Another process won the first-run race; use the secret it wrote.
         try:
             return path.read_text(encoding="utf-8").strip() or None, False
         except OSError:
             return None, False
     except OSError as error:
-        _notify(log_fn, f"WARNING: could not create the bridge token ({error}); token auth is off.")
+        _notify(log_fn, f"WARNING: could not create the {label} ({error}).")
         return None, False
     return token, True
+
+
+def load_auth_token(log_fn: LogFn = None) -> Tuple[Optional[str], bool]:
+    """Return (token, created). A token of None means token auth is off."""
+    if auth_disabled():
+        return None, False
+    env_token = (os.environ.get(TOKEN_ENV) or "").strip()
+    if env_token:
+        return env_token, False
+    token, created = load_or_create_token(token_path(), "bridge token", log_fn)
+    if token is None:
+        _notify(
+            log_fn,
+            "token auth is off (the origin allowlist stays active).",
+        )
+    return token, created
 
 
 def write_token_file(path: Path, token: str) -> None:

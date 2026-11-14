@@ -2,6 +2,7 @@ import asyncio
 import inspect
 import json
 import os
+import stat
 import sys
 import tempfile
 import unittest
@@ -240,6 +241,41 @@ class BridgeAuthTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(bridge.origin_allowed("chrome-extension://abcdefghijklmnop"))
         for rejected in ("https://evil.example", "http://127.0.0.1:8080", "null", "file://"):
             self.assertFalse(bridge.origin_allowed(rejected), rejected)
+
+    def test_extensions_pair_without_a_token_but_native_clients_do_not(self):
+        """An extension Origin needs no copy-paste; a native client still does."""
+        with patch.dict(os.environ, {bridge.AUTH_DISABLE_ENV: ""}):
+            for origin in (
+                "chrome-extension://abcdefghijklmnop",
+                "moz-extension://abcdefgh",
+                "safari-web-extension://abcdefgh",
+            ):
+                self.assertFalse(bridge.token_required_for(origin), origin)
+            # No Origin at all: the bridge cannot tell this from any other
+            # local process, so it has to prove it holds the token.
+            self.assertTrue(bridge.token_required_for(None))
+            self.assertTrue(bridge.token_required_for(""))
+            self.assertTrue(bridge.token_required_for("https://evil.example"))
+
+    def test_strict_mode_requires_the_token_from_extensions_too(self):
+        with patch.dict(os.environ, {bridge.AUTH_DISABLE_ENV: "strict"}):
+            self.assertTrue(bridge.strict_auth())
+            self.assertTrue(bridge.token_required_for("chrome-extension://abcdefghijklmnop"))
+            self.assertTrue(bridge.token_required_for(None))
+
+    def test_a2a_token_file_is_reused_and_private(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "nested" / "a2a_token"
+            with patch.dict(os.environ, {"ZS_A2A_TOKEN_FILE": str(path)}):
+                self.assertEqual(bridge.a2a_token_path(), path)
+            first, created = bridge.load_or_create_token(path, "A2A token")
+            self.assertTrue(created)
+            self.assertTrue(first)
+            second, created_again = bridge.load_or_create_token(path, "A2A token")
+            self.assertEqual(first, second)
+            self.assertFalse(created_again)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
 
     def test_token_is_generated_once_with_private_permissions(self):
         with tempfile.TemporaryDirectory() as temp_dir:

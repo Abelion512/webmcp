@@ -42,10 +42,12 @@ violation)**, so the extension can tell them apart from "bridge not running".
 - **Where the token lives**: `~/.snapgent/bridge_token` (mode `600`, directory `700`),
   generated on the bridge's first run. It is printed once in the bridge window as
   `bridge token: …`; nothing else ever logs the value.
-- **Pairing**: open the Snapgent popup. When the bridge refuses the connection the
-  status reads `Bridge token required` and a token field appears. Paste the token,
-  press Save; the extension keeps it in `chrome.storage.local` under `bridgeToken`
-  and reconnects.
+- **Pairing**: nothing to do. The bridge accepts an `chrome-extension://` Origin on
+  the allowlist, so the popup connects on its own and keeps the connection across
+  restarts. Only `ZS_BRIDGE_AUTH=strict` makes it want a token from an extension:
+  then the status reads `Bridge token required` and a token field appears. Paste
+  the token, press Save; the extension keeps it in `chrome.storage.local` under
+  `bridgeToken` and reconnects.
 - **Forgetting / rotating**: `🗝 Forget saved token` in the popup clears the stored
   copy and prompts again. `🔑 Rotate token` (shown while connected) asks the bridge to
   generate a new secret and write it to the token file. The bridge replies with the
@@ -63,8 +65,9 @@ violation)**, so the extension can tell them apart from "bridge not running".
   `websockets` versions, the auth mode, the token path and the endpoint, then exits
   without installing anything or starting the bridge.
 - **Overrides**: `ZS_BRIDGE_TOKEN` pins an exact token, `ZS_BRIDGE_TOKEN_FILE` moves
-  the file, and `ZS_BRIDGE_AUTH=0` (`off`, `false`, `no`) disables token auth — the
-  origin allowlist stays active either way.
+  the file, `ZS_BRIDGE_AUTH=strict` requires the token from extensions too, and
+  `ZS_BRIDGE_AUTH=0` (`off`, `false`, `no`) disables token auth — the origin
+  allowlist stays active either way.
 
 ### Close code 1008
 
@@ -73,9 +76,10 @@ violation)**, so the extension can tell them apart from "bridge not running".
 - `rejected client from origin 'https://…'` — a web page tried to open the socket.
   Only `chrome-extension://` origins, and clients that send no `Origin` at all, are
   accepted. Nothing to fix; this is the protection working.
-- `rejected client with a missing or invalid bridge token` — the extension is not
-  paired yet, or the token was rotated since it was saved. Paste the current token
-  in the popup.
+- `rejected client with a missing or invalid bridge token` — a client that sends no
+  `Origin` (a script or another local tool) did not present the token from
+  `~/.snapgent/bridge_token`, or the bridge is in `strict` mode and an extension has
+  no token yet. Extensions pair on their own unless `strict` is set.
 
 Repeated rejections are logged at most once per minute, with a
 `(N more since the last report)` suffix, so an unpaired extension retrying every few

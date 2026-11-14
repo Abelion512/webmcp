@@ -175,23 +175,26 @@ directory.
 
 Keep the terminal window open while the bridge runs.
 
-**Pairing the extension (bridge token)**
+**Connecting the extension**
 
-The bridge only accepts connections from the extension, and requires a per-install
-token, so a regular web page cannot drive your workspace through port 17613.
+Open the snapgentV3 popup — it connects on its own. There is nothing to copy.
+The bridge accepts a browser extension on the Origin allowlist (a web page
+cannot forge a `chrome-extension://` Origin, and an extension cannot exist
+without you installing it) and refuses everything else, so a regular web page
+still cannot drive your workspace through port 17613.
 
-1. The first start creates `~/.snapgent/bridge_token` (mode `600`) and prints the
-   value once in the bridge window, as `bridge token: …`.
-2. Open the snapgentV3 popup. While the bridge is refusing the connection it shows
-   `Bridge token required` together with a token field.
-3. Paste the token, press **Save**, and the popup reconnects as `Connected`.
+Clients that send **no** `Origin` header — scripts and other local tools — cannot
+be told apart from any other local process, so they must present the token from
+`~/.snapgent/bridge_token` (mode `600`), created on the bridge's first run.
 
-Updating? Replace the extension **and** the bridge from the same release: the
-check fails closed, and an extension that predates this change has no token
-field, so against a new bridge it can only report `Bridge offline`. Start the
-bridge with `ZS_BRIDGE_AUTH=0` to keep such an extension working.
+Updating? Replace the extension **and** the bridge from the same release where you
+can. An extension that predates this change has no token field, which no longer
+matters for connecting: it is accepted on the Origin allowlist. For the old rule
+start the bridge with `ZS_BRIDGE_AUTH=strict`.
 
-The extension keeps the token in `chrome.storage.local`. **🔑 Rotate token** (visible
+In `strict` mode the popup shows `Bridge token required` and a token field; paste
+the value from `~/.snapgent/bridge_token` and press **Save**. The extension keeps
+the token in `chrome.storage.local`. **🔑 Rotate token** (visible
 while connected) asks the bridge for a new secret and saves it on both sides; the
 bridge then closes every authenticated connection, so a leaked token cannot keep a
 live session. The extension reconnects with the new value by itself — no restart
@@ -200,13 +203,14 @@ needed, and the popup reads `Token rotated · reconnecting` for that second inst
 again.
 
 Advanced: `ZS_BRIDGE_TOKEN_FILE` moves the token file, `ZS_BRIDGE_TOKEN` pins an exact
-value (rotation is then refused), and `ZS_BRIDGE_AUTH=0` disables token auth — only
-the token check is affected, the origin allowlist stays active. To inspect the
-configuration without starting the bridge, run `bash Linux_Start.sh --check`.
+value (rotation is then refused), `ZS_BRIDGE_AUTH=strict` requires the token from
+every client including extensions, and `ZS_BRIDGE_AUTH=0` disables token auth — only
+the token check is affected, the origin allowlist stays active either way. To inspect
+the configuration without starting the bridge, run `bash Linux_Start.sh --check`.
 
-If the popup keeps saying `Bridge token required` after saving, the token was rotated
-since you copied it: paste the current value from `~/.snapgent/bridge_token`. A `1008`
-policy-violation close in the bridge window means the same thing — see
+If the popup keeps saying `Bridge token required` after saving (strict mode), the token
+was rotated since you copied it: paste the current value from `~/.snapgent/bridge_token`.
+A `1008` policy-violation close in the bridge window means the same thing — see
 [`docs/linux-stability.md`](docs/linux-stability.md).
 
 **④ Start a session**
@@ -335,7 +339,7 @@ bridge on ports 17613/9333).
 |---|---|---|
 | snapgentV3 bar is missing | Extension is disabled or site access is blocked | Check the extension is enabled and allowed on the current AI chat site, then reload the tab |
 | Bridge is offline | Bridge is not running | Run `bash Linux_Start.sh` (Linux) |
-| Popup shows `Bridge token required` | The bridge refuses the connection without its per-install token (close code 1008) | Paste the token from the bridge window or `~/.snapgent/bridge_token` into the popup field and press **Save** |
+| Popup shows `Bridge token required` | The bridge was started with `ZS_BRIDGE_AUTH=strict`, so it wants the token even from an extension (close code 1008) | Paste `~/.snapgent/bridge_token` into the popup field and press **Save** — or drop `strict` so extensions pair on their own |
 | MCP server keeps dying / tools fail after a while | Subprocess crashed; the bridge restarts it with backoff (5 s → 300 s) | Send `get_bridge_status` over the WebSocket and check `restart_attempts`, `error`, and `log_tail` (see `docs/security-and-ops.md`) |
 | AI replies without using tools | Provider/model stopped following commands | Remind it to use snapgentV3 commands or start a new chat |
 | A configured MCP server is missing from the target dropdown | The server was switched off in the **MCP servers** panel, or the extension is outdated | Open **MCP servers** from the ⋯ menu on the snapgent bar and tick the server, then reload the extension in `chrome://extensions` and refresh the chat tab |

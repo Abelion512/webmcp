@@ -39,16 +39,18 @@ A2A agent card: http://127.0.0.1:17614/.well-known/agent-card.json
 A2A bearer token: <token>
 ```
 
-The token is printed to the terminal only, never to `logs/bridge_debug.log`.
+The token goes to `~/.snapgent/a2a_token` and the terminal, never to
+`logs/bridge_debug.log`.
 Keep the terminal open while you use the agent.
 
 ## Authenticate
 
-Every `POST /` needs the bearer token. Copy the token the bridge printed to the
-terminal:
+Every `POST /` needs the bearer token. The bridge keeps it in
+`~/.snapgent/a2a_token` (mode `600`, directory `700`, reused across restarts) and
+also prints it, so a local agent reads the file instead of copying anything:
 
 ```
-export ZS_A2A_TOKEN=<token from the bridge terminal>
+export ZS_A2A_TOKEN=$(cat ~/.snapgent/a2a_token)
 ```
 
 The Agent Card is public and needs no token:

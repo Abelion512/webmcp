@@ -25,14 +25,18 @@ from bridge_auth import (
     AUTH_DISABLED_VALUES,
     TOKEN_ENV,
     TOKEN_PATH_ENV,
+    a2a_token_path,
     auth_disabled,
     header_value,
     host_allowed,
     load_auth_token,
+    load_or_create_token,
     origin_allowed,
     presented_token,
+    strict_auth,
     token_matches,
     token_path,
+    token_required_for,
     write_token_file,
 )
 
@@ -729,7 +733,9 @@ class Bridge:
             )
             await self._reject_handshake(websocket, "origin not allowed")
             return
-        if self.token:
+        # Extensions are trusted on their Origin alone (see token_required_for);
+        # native clients still have to present the token.
+        if self.token and token_required_for(origin):
             presented = presented_token(websocket)
             if not presented or not token_matches(presented, self.token):
                 self._log_rejection(
@@ -1061,7 +1067,13 @@ def build_a2a_server(bridge: "Bridge", loop: asyncio.AbstractEventLoop) -> Any:
         timeout_ms = int(os.environ.get("ZS_A2A_TIMEOUT_MS", str(a2a_server.DEFAULT_TIMEOUT_MS)))
     except ValueError:
         timeout_ms = a2a_server.DEFAULT_TIMEOUT_MS
-    token = os.environ.get("ZS_A2A_TOKEN") or secrets.token_urlsafe(32)
+    # A file next to the bridge token, so a local agent reads it instead of
+    # copying the value out of the terminal.
+    token = (os.environ.get("ZS_A2A_TOKEN") or "").strip()
+    token_created = False
+    if not token:
+        token, token_created = load_or_create_token(a2a_token_path(), "A2A token", log)
+        token = token or secrets.token_urlsafe(32)
 
     def submit(prompt: str, task_timeout: float) -> Dict[str, Any]:
         future = asyncio.run_coroutine_threadsafe(bridge.submit_prompt(prompt, task_timeout), loop)
@@ -1107,17 +1119,22 @@ async def run() -> None:
     log(f"snapgent bridge v{BRIDGE_VERSION}")
     log(f"listening on ws://{HOST}:{PORT} - load the extension and open a supported AI chat")
     if token:
-        if (os.environ.get(TOKEN_ENV) or "").strip():
-            log(f"auth: token required ({TOKEN_ENV}); origin allowlist enforced")
+        if strict_auth():
+            source = TOKEN_ENV if (os.environ.get(TOKEN_ENV) or "").strip() else str(token_path())
+            log(f"auth: strict - every client must present the token from {source}; "
+                "origin allowlist enforced")
         else:
-            log(f"auth: token required from {token_path()}; origin allowlist enforced")
+            log(
+                "auth: extensions pair automatically (origin allowlist); other "
+                f"local clients need the token from {token_path()} "
+                f"(set {AUTH_DISABLE_ENV}=strict to require it from extensions too)"
+            )
         if created:
             # The token itself never goes into the log: bridge_debug.log is a
             # world-readable file next to the workspace, and get_bridge_status
-            # tails it back to every paired client. The popup pairing flow
-            # reads the token from the token file, not from this message.
-            log("first run: paste this token into the Snapgent popup once (it is saved by the extension)")
-            log(f"bridge token saved to {token_path()}")
+            # tails it back to every paired client. Extensions do not need it
+            # at all; native clients read it from the file.
+            log(f"bridge token created at {token_path()}")
     else:
         log(
             "WARNING: bridge token auth is disabled - any local process can call MCP tools. "
@@ -1130,10 +1147,13 @@ async def run() -> None:
             a2a = build_a2a_server(bridge, loop)
             a2a.start()
             log(f"A2A agent card: http://{HOST}:{a2a.port}/.well-known/agent-card.json")
-            # Token goes to the terminal only, never to the log file: the file is
-            # world-readable by default and this token gates an RPC that can write
-            # workspace files.
-            print(f"A2A bearer token: {a2a.token} (set ZS_A2A_TOKEN to pin it)", flush=True)
+            # Printed for convenience, and kept in a 0600 file so an agent can
+            # read it without copying out of the terminal. Never in the log
+            # file: that one is world-readable and this token gates an RPC that
+            # can write workspace files.
+            print(f"A2A bearer token: {a2a.token}", flush=True)
+            if not os.environ.get("ZS_A2A_TOKEN"):
+                print(f"                 read it from {a2a_token_path()}", flush=True)
         except OSError as error:
             log(f"A2A server disabled: {error}")
             a2a = None
