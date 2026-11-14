@@ -51,6 +51,18 @@ const chrome = {
     onInstalled: { addListener: () => {} },
     get lastError() { return lastError; },
   },
+  // background.js reads the persisted pairing state before its first dial.
+  storage: {
+    local: {
+      get: (key, cb) => {
+        const values = typeof key === "string" ? { [key]: undefined } : {};
+        if (cb) cb(values);
+        return Promise.resolve(values);
+      },
+      set: (_obj, cb) => { if (cb) cb(); return Promise.resolve(); },
+      remove: (_key, cb) => { if (cb) cb(); return Promise.resolve(); },
+    },
+  },
   tabs: {
     query: (_info, cb) => {
       const tabs = [providerTab];
@@ -66,10 +78,21 @@ const chrome = {
 };
 
 // ── Load background.js against the stubs ────────────────────────────────────
+// background.js pulls core/pairing.js in with importScripts. The stub exposes
+// it on the global, which is where the worker's bare `ZSPairing` resolves.
+// new Function is safe here for the same reason as test-pairing.js: the
+// evaluated string is this repo's own source read from disk, `relpath` is a
+// literal, and no part of it is user input.
+const importScripts = (relpath) => {
+  globalThis.ZSPairing = new Function(
+    fs.readFileSync(__dirname + "/" + relpath, "utf8") + "; return ZSPairing;"
+  )();
+};
+
 const src = fs.readFileSync(__dirname + "/background.js", "utf8");
-const api = new Function("chrome", "WebSocket",
+const api = new Function("chrome", "WebSocket", "importScripts",
   src + "; return { handleBridgeMessage, handleSubmitPrompt };"
-)(chrome, StubWebSocket);
+)(chrome, StubWebSocket, importScripts);
 
 const results = [];
 const ok = (name, cond) => { results.push(cond); console.log((cond ? "PASS" : "FAIL") + "  " + name); };
@@ -83,9 +106,12 @@ const until = async (cond, ms = 1000) => {
 };
 
 (async () => {
-  // Load fires connect(); drive the handshake so the relay can send frames.
-  // A real WebSocket is already OPEN when onopen fires; mirror that here or
-  // send() would treat the socket as not yet open and buffer forever.
+  // Load fires connect(), which awaits the stored pairing token before it dials,
+  // so the socket only exists a microtask later.
+  await until(() => !!StubWebSocket.instance);
+  // Drive the handshake so the relay can send frames. A real WebSocket is
+  // already OPEN when onopen fires; mirror that here or send() would treat the
+  // socket as not yet open and buffer forever.
   StubWebSocket.instance.readyState = StubWebSocket.OPEN;
   StubWebSocket.instance.onopen();
   ok("socket connected after onopen", StubWebSocket.instance.readyState === StubWebSocket.OPEN);

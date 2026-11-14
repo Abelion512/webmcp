@@ -16,6 +16,10 @@ const URL = `ws://127.0.0.1:${PORT}`;
 // Pairing secret issued by the bridge (~/.snapgent/bridge_token). The popup saves
 // it here; the bridge rejects connections without it once auth is enabled.
 const TOKEN_KEY = "bridgeToken";
+// Persisted pairing state. The worker is evicted between events, so a bridge
+// that refused our token (close 1008) has to be remembered in storage: without
+// it the next wake re-dials, is refused again, and the popup loses the card.
+const AUTH_STATE_KEY = "bridgeAuthRequired";
 
 // Chat sites where a snapgentV3 provider content script runs. Status pushes go
 // to every tab matching these. Add the new provider's URL pattern here (and in
@@ -90,7 +94,20 @@ function readBridgeToken() {
   });
 }
 
+// The persisted pairing state, read once per worker start. Every dial waits on
+// it: a worker wake-up can deliver a message (the tabs poll `status` every 5 s)
+// before the storage read resolves, and without this the handler would see the
+// default `authRequired = false` and redial a bridge that already refused us.
+const authReady = new Promise((resolve) => {
+  chrome.storage.local.get(AUTH_STATE_KEY, (stored) => {
+    authRequired = !!(stored && stored[AUTH_STATE_KEY]);
+    resolve();
+  });
+});
+
 async function connect() {
+  await authReady;
+  if (authRequired) return; // parked: only the popup saving a token dials again
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
     return;
   }
@@ -112,6 +129,7 @@ async function connect() {
   ws.onopen = () => {
     connected = true;
     authRequired = false;
+    chrome.storage.local.remove(AUTH_STATE_KEY); // the token is accepted again
     rotatingToken = false;
     reconnectDelay = RECONNECT_MIN;
     lastMessageAt = Date.now();
@@ -147,6 +165,15 @@ async function connect() {
     stopHeartbeat();
     failAllPending("bridge connection closed");
     broadcastStatus();
+    // 1008 is the bridge refusing our token, and redialling just repeats the
+    // refusal once a second until the popup saves a token. Park instead, and
+    // remember it in storage so the pairing card survives a worker eviction.
+    if (authRequired) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+      chrome.storage.local.set({ [AUTH_STATE_KEY]: true });
+      return;
+    }
     scheduleReconnect();
   };
 
@@ -449,7 +476,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   (async () => {
     switch (msg.type) {
       case "status":
-        if (!connected) connect(); // self-heal after a worker wake-up
+        // Self-heal after a worker wake-up, but never while parked on a refused
+        // token: an open tab polls this every 5 s and would redial each time.
+        if (!connected && !authRequired) connect();
         else refreshBridgeStatus(); // stale-guarded (5 s), fire-and-forget
         if (bridgeToken === null) bridgeToken = await readBridgeToken();
         sendResponse(statusObj());
@@ -518,6 +547,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       }
       case "reconnect":
         reconnectDelay = RECONNECT_MIN;
+        authRequired = false; // the popup may have just saved a valid token
+        chrome.storage.local.remove(AUTH_STATE_KEY);
         bridgeToken = null; // re-read: the popup may have just saved a token
         connect();
         sendResponse({ ok: true });
@@ -529,7 +560,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   return true; // async sendResponse
 });
 
-// Wake/keepalive hooks.
+// Wake/keepalive hooks. connect() waits for the persisted pairing state and
+// refuses to dial while parked, so these stay unconditional.
 chrome.runtime.onStartup.addListener(connect);
 chrome.runtime.onInstalled.addListener(connect);
 
