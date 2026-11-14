@@ -64,6 +64,9 @@ jobs:
           node snapgent-extension/test-meta.js
           node snapgent-extension/test-popup-status.js
           node snapgent-extension/test-pairing.js
+          node snapgent-extension/test-reconnect.js
+          node snapgent-extension/test-rudder.js
+          node snapgent-extension/test-a2a.js
 
   e2e:
     runs-on: ubuntu-latest

@@ -76,6 +76,17 @@ All notable changes to snapgentV3 Free are documented here.
   artifacts on every sync.
 
 ### Fixed
+- **The extension no longer hammers the bridge with a missing token.** The bridge
+  refuses a client whose token is missing or wrong by closing with 1008, and
+  `background.js` redialled unconditionally; the content script's 5 s `status`
+  poll also dialled whenever the socket was down. An install with no stored token
+  therefore hit the bridge ~71 times a minute forever ("rejected client with a
+  missing or invalid bridge token" in the bridge log, 123 sockets in TIME-WAIT)
+  and could never come up. The extension now parks on a 1008 close, remembers
+  that state in `chrome.storage.local` so the popup keeps showing the pairing
+  card across a service-worker eviction, and dials again only when the popup
+  saves a token. Measured live: 0 connections/min, down from 40-71. Covered by
+  `snapgent-extension/test-reconnect.js`.
 - **ChatGPT: the snapgentV3 bar no longer covers the page's "Scroll to bottom"
   button.** ChatGPT replaced the composer-surface grid with a flex-column
   `ComposerLayoutRoot`, so `barMount()` found no container and the bar fell back
