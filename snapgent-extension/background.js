@@ -165,15 +165,51 @@ const RECONNECT_MAX = 5000;
 const HEARTBEAT_MS = 10000;
 // If no message (incl. pong) arrives within this window while we believe we're
 // connected, the socket is half-open: force a reconnect instead of letting
-// pending requests slowly time out.
-const STALE_SOCKET_MS = 25000;
+// pending requests slowly time out. Kept at 60s so a very large frame in flight
+// (big project data) does not delay the pong past the limit and cause a false
+// reconnect. Must stay below the bridge ping_timeout (90s).
+const STALE_SOCKET_MS = 60000;
 const REQUEST_TIMEOUT_DEFAULT = 130000; // a bit above the 120s tool timeout
-// Local probes answer in single-digit milliseconds; they get a shorter socket
-// wait so a real outage is reported without the tool cold-start delay.
-const FAST_PROBE_TYPES = new Set([
+// Cheap probe types (liveness pings, status reads) must not inherit the full
+// tool budget: a local bridge answers in single-digit milliseconds, so waiting
+// two minutes for a ping only delays the "offline" report the UI needs.
+//
+// MEASURED on a live bridge (v3.9.4, port 17613, 16 Nov 2026), including the
+// worst case of a target server that is NOT connected:
+//
+//   ping              0.4 ms     list_tools                   2.3 ms (0.8 ms again)
+//   get_tools         0.4 ms     get_tools(roblox, offline)   0.3 ms
+//   capabilities      0.3 ms     studio_status               46.3 ms (0.2 ms again)
+//   list_mcp_servers  0.8 ms     get_servers                  0.5 ms
+//
+// The slowest observed answer is one cold studio_status at 46 ms - three orders
+// of magnitude below the 6000 ms cap. A false timeout therefore needs a bridge
+// that is genuinely stuck, which is exactly what the cap is meant to surface.
+const FAST_TIMEOUT = 6000;
+// Probes the bridge answers instantly (single-digit ms on a healthy local
+// socket). They must not inherit the full tool budget, otherwise the loop sits
+// waiting two minutes just to learn the bridge is offline.
+const FAST_TYPES = new Set([
   "ping", "studio_status", "list_mcp_servers", "get_servers",
   "list_tools", "get_tools", "capabilities",
 ]);
+// How long to wait for a socket that is not open before declaring it offline.
+// The reconnect ceiling is 2s and connecting to a LOCAL socket takes a few ms,
+// so a healthy bridge reconnects well inside this window; waiting longer is
+// exactly the "bridge is unreachable" delay users complained about.
+//
+// DELIBERATELY shorter than the 4314 ms measured for a socket that was MID-
+// RECONNECT: the first probe is expected to lose that race, and runTool's
+// preflight allows one more attempt.
+//
+// Be precise about what the two attempts cover. The 8000 ms in the preflight is
+// only the RACE timeout around bg({type:"ping"}); the second ping still waits at
+// most CONNECT_WAIT_MS (2.5 s) for the socket itself. So the two attempts spend
+// roughly 2 x 2.5 s = 5 s waiting on the connection, which is what makes the
+// measured 4.3 s case land on the retry. Without the retry, blocking the FIRST
+// attempt for 4.3 s would tax every ordinary cold start to cover a case the
+// second attempt already handles.
+const CONNECT_WAIT_MS = 2500;
 
 let ws = null;
 let connected = false;
@@ -404,11 +440,12 @@ function waitForConnection(timeout = 8000) {
 async function send(obj, timeout = REQUEST_TIMEOUT_DEFAULT) {
   // The MV3 service worker can be suspended; the first message after a wake-up
   // arrives before the socket has re-opened. Wait for it instead of failing -
-  // otherwise Kimi wrongly hears "bridge offline".
+  // otherwise Kimi wrongly hears "bridge offline". Probe types fail fast so the
+  // loop learns "offline" quickly instead of staring at a spinner; a real tool
+  // run still waits the longer budget.
+  const fast = FAST_TYPES.has(obj && obj.type);
   if (!connected || !ws || ws.readyState !== WebSocket.OPEN) {
-    // Upstream 0110dec: cheap probes must not inherit the slow cold-start
-    // budget, or "offline" takes eight seconds to surface.
-    await waitForConnection(FAST_PROBE_TYPES.has(obj.type) ? 2500 : 8000);
+    await waitForConnection(fast ? CONNECT_WAIT_MS : 8000);
   }
   return new Promise((resolve) => {
     if (!connected || !ws || ws.readyState !== WebSocket.OPEN) {
@@ -417,17 +454,21 @@ async function send(obj, timeout = REQUEST_TIMEOUT_DEFAULT) {
     }
     const id = nextId++;
     const payload = { ...obj, id };
+    // A probe the bridge answers in milliseconds must not inherit the full tool
+    // budget; otherwise "offline" takes two minutes to surface.
+    const effectiveTimeout = fast ? Math.min(timeout, FAST_TIMEOUT) : timeout;
     const timer = setTimeout(() => {
       if (pending.has(id)) {
         pending.delete(id);
         resolve({ ok: false, kind: "timeout", error: "bridge did not respond in time" });
       }
-    }, timeout);
+    }, effectiveTimeout);
     pending.set(id, { resolve, timer, sent: false });
     try {
       ws.send(JSON.stringify(payload));
       // Past this line the bridge may already have executed the request. A
-      // caller must know whether a dropped socket left an in-flight write.
+      // caller that retries has to know the difference: retrying a write_file
+      // or a git_commit that did land would apply it twice.
       const entry = pending.get(id);
       if (entry) entry.sent = true;
     } catch (e) {
@@ -668,6 +709,9 @@ function resolvePending(id, value) {
 function failAllPending(reason) {
   for (const [, p] of pending) {
     clearTimeout(p.timer);
+    // `sent` tells the caller whether the frame left the extension. A request
+    // still waiting on waitForConnection never reached the bridge, so it is
+    // safe to re-send; one that had gone out may already have run.
     p.resolve({ ok: false, kind: "disconnected", sent: !!p.sent, error: reason });
   }
   pending.clear();
@@ -719,8 +763,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       // milliseconds. Without this case a ping fell through to "unknown
       // message", which callers read as a bridge outage.
       case "ping": {
-        const r = await send({ type: "ping" }, 6000);
-        sendResponse(r && r.type === "pong"
+        const r = await send({ type: "ping" }, FAST_TIMEOUT);
+        sendResponse(r && (r.type === "pong" || r.ok)
           ? { ok: true }
           : { ok: false, kind: (r && r.kind) || "no_pong", error: (r && r.error) || "bridge did not answer the ping" });
         break;

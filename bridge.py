@@ -87,6 +87,10 @@ REJECT_LOG_INTERVAL = 60.0
 ROTATE_CLOSE_CODE = 1012
 ROTATE_CLOSE_REASON = "bridge token rotated; reconnect with the new token"
 
+# Large payloads serialize off the event loop so one slow frame cannot block pings.
+MAX_CONCURRENT_REQUESTS = 32
+BIG_PAYLOAD_THREAD_BYTES = 256 * 1024
+
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
@@ -203,7 +207,7 @@ class MCPServer:
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
-                    limit=64 * 1024 * 1024,
+                    limit=128 * 1024 * 1024,
                 )
             except (OSError, ValueError) as error:
                 self.error = str(error)
@@ -339,11 +343,32 @@ class MCPServer:
             return
         try:
             while True:
-                line = await process.stdout.readline()
+                try:
+                    line = await process.stdout.readline()
+                except ValueError:
+                    # Response line exceeded the stream limit. Discard the rest of it,
+                    # fail waiting requests with a clear error, and keep the server alive.
+                    log(f"[{self.server_id}] MCP response exceeded the buffer limit; discarding it.")
+                    while True:
+                        chunk = await process.stdout.read(1024 * 1024)
+                        if not chunk or b"\n" in chunk:
+                            break
+                    for future in list(self._pending.values()):
+                        if not future.done():
+                            future.set_exception(
+                                RuntimeError(
+                                    f"{self.server_id} MCP response was too large (over 128 MB). "
+                                    "Request a smaller range or fewer items."
+                                )
+                            )
+                    continue
                 if not line:
                     break
                 try:
-                    message = json.loads(line.decode("utf-8"))
+                    if len(line) > BIG_PAYLOAD_THREAD_BYTES:
+                        message = await asyncio.to_thread(lambda raw=line: json.loads(raw.decode("utf-8")))
+                    else:
+                        message = json.loads(line.decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError):
                     log(f"[{self.server_id}] ignored non-JSON MCP stdout.")
                     continue
@@ -588,9 +613,18 @@ class Bridge:
         caller would wait out the whole timeout.
         """
         try:
-            await client.send(_json_line(message))
+            text = message.get("text") if isinstance(message, dict) else None
+            heavy = bool(
+                isinstance(message, dict)
+                and (
+                    (isinstance(text, str) and len(text) > BIG_PAYLOAD_THREAD_BYTES)
+                    or message.get("images")
+                )
+            )
+            payload = await asyncio.to_thread(_json_line, message) if heavy else _json_line(message)
+            await client.send(payload)
         except Exception as error:
-            log(f"bridge: failed to send to client: {error}")
+            log(f"send to client failed: {type(error).__name__}: {str(error)[:200]}")
             return False
         return True
 
@@ -829,18 +863,49 @@ class Bridge:
             self._last_client = websocket
         log("extension connected")
         await self._send_client(websocket, self._connected_message())
+        pending: set = set()
+        limiter = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+
+        async def _run(request: Dict[str, Any]) -> None:
+            async with limiter:
+                try:
+                    await self._handle_request(websocket, request)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    log(f"request handler error: {error}")
+                    await self._send_client(
+                        websocket,
+                        {
+                            "type": "tool_result",
+                            "id": request.get("id"),
+                            "ok": False,
+                            "kind": "tool_error",
+                            "error": f"Bridge error: {error}",
+                        },
+                    )
+
         try:
             async for raw in websocket:
                 try:
-                    request = json.loads(raw)
+                    if len(raw) > BIG_PAYLOAD_THREAD_BYTES:
+                        request = await asyncio.to_thread(json.loads, raw)
+                    else:
+                        request = json.loads(raw)
                 except (TypeError, json.JSONDecodeError):
                     await self._send_client(websocket, {"type": "error", "error": "Invalid JSON request."})
                     continue
                 if not isinstance(request, dict):
                     await self._send_client(websocket, {"type": "error", "error": "Request must be a JSON object."})
                     continue
-                await self._handle_request(websocket, request)
+                task = asyncio.create_task(_run(request))
+                pending.add(task)
+                task.add_done_callback(pending.discard)
         finally:
+            for task in list(pending):
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
             async with self._client_lock:
                 self.clients.discard(websocket)
                 remaining = bool(self.clients)
@@ -1218,9 +1283,10 @@ async def run() -> None:
         HOST,
         PORT,
         origins=allowed_origins,
-        max_size=50 * 1024 * 1024,
+        max_size=128 * 1024 * 1024,
+        max_queue=256,
         ping_interval=20,
-        ping_timeout=20,
+        ping_timeout=90,
     )
     log(f"snapgent bridge v{BRIDGE_VERSION}")
     log(f"listening on ws://{HOST}:{PORT} - load the extension and open a supported AI chat")
